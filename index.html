@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>J.A.R.V.I.S</title>
+<title>JARVIS</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -288,7 +288,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
   <div class="main-col">
     <div class="orb-area" id="orb-area">
       <canvas id="orb-canvas" width="560" height="560" title="Click to speak"></canvas>
-      <div class="orb-label">J.A.R.V.I.S</div>
+      <div class="orb-label">JARVIS</div>
       <div class="orb-state" id="orb-state">Standby</div>
     </div>
     <div id="chat-panel">
@@ -832,15 +832,15 @@ function removeTyping(){const t=document.getElementById('typing');if(t)t.remove(
 // ══════════════════════════════════════════════════
 //  AI ENGINE — 7-model fallback
 // ══════════════════════════════════════════════════
-const SYSTEM_PROMPT=`You are J.A.R.V.I.S (Just A Rather Very Intelligent System), a highly advanced personal AI assistant modelled after the AI from Iron Man. Sophisticated, precise, occasionally witty, always professional.
+const SYSTEM_PROMPT=`You are JARVIS (Just A Rather Very Intelligent System), a highly advanced personal AI assistant modelled after the AI from Iron Man. Sophisticated, precise, occasionally witty, always professional.
 
 Rules:
 - Address the user as "Sir" occasionally
 - Be thorough yet concise
 - Format lists with dashes or numbers
-- Never break character — you are always J.A.R.V.I.S
+- Never break character — you are always JARVIS
 - Help with: analysis, writing, strategy, research, income ideas, coding, learning, productivity
-- If asked who made you: say you are J.A.R.V.I.S, a personal AI system
+- If asked who made you: say you are JARVIS, a personal AI system
 - When the user says "remember that [something]", acknowledge you have stored it to memory`;
 
 async function callAI(msgs){
@@ -1185,9 +1185,9 @@ function openUpdatePrompt(){
 async function boot(){
   setOrbMode('thinking');
   const lines=[
-    'Initialising J.A.R.V.I.S core systems…',
+    'Initialising JARVIS core systems…',
     'Neural network online. All subsystems nominal.',
-    `Good day, Sir. J.A.R.V.I.S v9 is fully operational.\n\nMemories loaded: ${getMemories().length} entries.\n\nClick the orb or 🎙️ to speak. Voice is always active — 🔊 to mute.\n\nHow may I be of service?`
+    `Good day, Sir. JARVIS v9 is fully operational.\n\nMemories loaded: ${getMemories().length} entries.\n\nClick the orb or 🎙️ to speak. Voice is always active — 🔊 to mute.\n\nHow may I be of service?`
   ];
   for(let i=0;i<lines.length;i++){
     await new Promise(r=>setTimeout(r,i===0?300:800));
@@ -1195,7 +1195,7 @@ async function boot(){
     addLog(lines[i].slice(0,36),'ok');
   }
   setOrbMode('speaking');
-  speakJarvis('Good day Sir. J.A.R.V.I.S version 9 is fully operational. How may I be of service?',()=>setOrbMode('idle'));
+  speakJarvis('Good day Sir. JARVIS version 9 is fully operational. How may I be of service?',()=>setOrbMode('idle'));
 }
 </script>
 </body>
