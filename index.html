@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>JARVIS</title>
+<title>J.A.R.V.I.S</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -191,7 +191,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <!-- ══ LOGIN ══ -->
 <div id="login-overlay">
   <div class="login-card">
-    <div class="login-logo">JARVIS · SECURE ACCESS</div>
+    <div class="login-logo">J.A.R.V.I.S · SECURE ACCESS</div>
     <div class="login-title">Authentication Required</div>
     <div class="login-sub">Restricted system — authorised personnel only.</div>
     <div class="login-scan"></div>
@@ -218,7 +218,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <!-- ══ SETUP OVERLAY ══ -->
 <div id="setup-overlay" style="display:none;">
   <div class="setup-card">
-    <div class="setup-logo">JARVIS · AI ENGINE</div>
+    <div class="setup-logo">J.A.R.V.I.S · AI ENGINE</div>
     <div class="setup-title">Connect AI Engine</div>
     <div class="setup-sub">Jarvis uses your own API key — no message limits.<br><a href="https://openrouter.ai" target="_blank">OpenRouter</a> is free with no credit card required.</div>
     <div class="stabs">
@@ -249,7 +249,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <div id="app">
   <!-- HEADER -->
   <header>
-    <div class="h-brand"><div class="h-dot"></div><div class="h-name">JARVIS <span>· SYSTEM ONLINE</span></div></div>
+    <div class="h-brand"><div class="h-dot"></div><div class="h-name">J.A.R.V.I.S <span>· SYSTEM ONLINE</span></div></div>
     <div class="h-center">
       <span id="engine-label" style="color:var(--text3);font-size:0.7rem;letter-spacing:0.06em;"></span>
       <span id="clock-el">--:--:--</span>
@@ -290,7 +290,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
   <div class="main-col">
     <div class="orb-area" id="orb-area">
       <canvas id="orb-canvas" width="560" height="560" title="Click to speak"></canvas>
-      <div class="orb-label">JARVIS</div>
+      <div class="orb-label">J.A.R.V.I.S</div>
       <div class="orb-state" id="orb-state">Standby</div>
     </div>
     <div id="chat-panel">
@@ -710,11 +710,24 @@ function ghHeaders(){
   return h;
 }
 
+// ── safe base64 encode that handles unicode ──
+function toBase64(str){
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  bytes.forEach(b => binary += String.fromCharCode(b));
+  return btoa(binary);
+}
+function fromBase64(b64){
+  const binary = atob(b64.replace(/\n/g,''));
+  const bytes = new Uint8Array(binary.length);
+  for(let i=0;i<binary.length;i++) bytes[i]=binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
 // ── LOAD from repo ────────────────────────────────
 async function loadMemoriesFromGist(){
-  // "FromGist" name kept for compatibility — actually reads from repo now
   try{
-    // Show localStorage immediately while we fetch from GitHub
+    // Show localStorage immediately while fetching from GitHub
     try{
       const local = JSON.parse(localStorage.getItem('j_memories')||'[]');
       if(local.length){ _memories=local; updateMemCount(); }
@@ -723,31 +736,36 @@ async function loadMemoriesFromGist(){
     const tok = getGHToken();
     if(!tok){
       _memoryLoaded=true;
-      addLog('Memory: local only — set GitHub token for repo sync','warn');
+      addLog('Memory: local only — set GitHub token','warn');
       return;
     }
 
-    const res = await fetch(GH_API_BASE+'?ref='+GH_BRANCH, {headers:ghHeaders()});
+    addLog('Loading memory from GitHub…','ok');
+    const res = await fetch(GH_API_BASE+'?ref='+GH_BRANCH+'&t='+Date.now(), {
+      headers: ghHeaders(),
+      cache: 'no-store'
+    });
+
     if(res.ok){
       const data = await res.json();
-      _fileSha = data.sha; // store SHA — needed for PATCH/PUT later
-      const decoded = atob(data.content.replace(/\n/g,''));
+      _fileSha = data.sha;
+      const decoded = fromBase64(data.content);
       _memories = JSON.parse(decoded) || [];
       try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
       _memoryLoaded=true;
       updateMemCount();
-      addLog('Memory loaded from repo: '+_memories.length+' entries','ok');
+      addLog('Memory loaded: '+_memories.length+' entries ✓','ok');
     } else if(res.status===404){
-      // File doesn't exist yet in repo — create it
-      addLog('memories.json not found in repo — creating…','warn');
-      await saveMemoriesToGist(true);
+      addLog('memories.json not in repo — will create on first save','warn');
+      _fileSha = null;
       _memoryLoaded=true;
       updateMemCount();
     } else if(res.status===401||res.status===403){
-      addLog('GitHub token invalid or lacks repo scope','err');
+      const e=await res.json().catch(()=>({}));
+      addLog('GitHub token error: '+(e.message||res.status)+' — needs "repo" scope','err');
       _memoryLoaded=true;
     } else {
-      const e = await res.json().catch(()=>({}));
+      const e=await res.json().catch(()=>({}));
       addLog('Memory load error: '+(e.message||res.status),'err');
       _memoryLoaded=true;
     }
@@ -761,54 +779,57 @@ async function loadMemoriesFromGist(){
 
 // ── SAVE to repo ──────────────────────────────────
 async function saveMemoriesToGist(isCreate=false){
-  // Always save locally first — instant, no network needed
   try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
   updateMemCount();
 
   const tok = getGHToken();
   if(!tok){
-    addLog('Memory saved locally only — set GitHub token to sync to repo','warn');
+    addLog('Memory saved locally — set token to sync to GitHub','warn');
     return;
   }
 
-  const contentBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(_memories,null,2))));
+  const contentBase64 = toBase64(JSON.stringify(_memories,null,2));
   const body = {
     message: 'Jarvis memory update — '+new Date().toISOString(),
     content: contentBase64,
     branch:  GH_BRANCH,
   };
-  // If we have the file SHA, include it so GitHub treats this as an update not a conflict
-  if(_fileSha && !isCreate) body.sha = _fileSha;
+  if(_fileSha) body.sha = _fileSha;
 
   try{
     const res = await fetch(GH_API_BASE, {
-      method:  'PUT',  // PUT creates or updates in Contents API
+      method:  'PUT',
       headers: ghHeaders(),
       body:    JSON.stringify(body),
     });
     if(res.ok){
       const d = await res.json();
-      _fileSha = d.content.sha; // update SHA for next save
-      addLog('Memory synced to GitHub repo ✓','ok');
+      _fileSha = d.content.sha;
+      addLog('Memory synced to GitHub ✓','ok');
     } else {
       const e = await res.json().catch(()=>({}));
-      addLog('Repo save failed: '+(e.message||res.status),'err');
-      // If conflict (SHA mismatch) — re-fetch SHA and retry once
-      if(res.status===409||res.status===422){
-        addLog('SHA conflict — re-fetching and retrying…','warn');
-        const fresh = await fetch(GH_API_BASE+'?ref='+GH_BRANCH,{headers:ghHeaders()});
+      addLog('GitHub save failed: '+(e.message||res.status),'err');
+      // SHA conflict — re-fetch and retry once
+      if(res.status===409||res.status===422||res.status===412){
+        addLog('Retrying with fresh SHA…','warn');
+        const fresh = await fetch(GH_API_BASE+'?ref='+GH_BRANCH,{headers:ghHeaders(),cache:'no-store'});
         if(fresh.ok){
           const fd = await fresh.json();
           _fileSha = fd.sha;
           body.sha = _fileSha;
           const retry = await fetch(GH_API_BASE,{method:'PUT',headers:ghHeaders(),body:JSON.stringify(body)});
-          if(retry.ok){ const rd=await retry.json(); _fileSha=rd.content.sha; addLog('Retry save OK','ok'); }
-          else { addLog('Retry save failed','err'); }
+          if(retry.ok){
+            const rd=await retry.json();
+            _fileSha=rd.content.sha;
+            addLog('Memory retry save OK ✓','ok');
+          } else {
+            addLog('Memory retry failed — saved locally only','err');
+          }
         }
       }
     }
   }catch(e){
-    addLog('Repo save exception: '+e.message,'err');
+    addLog('GitHub save exception: '+e.message,'err');
   }
 }
 
@@ -1679,9 +1700,9 @@ async function boot(){
   const memLoaded = await loadMemoriesFromGist();
   const hasToken = !!getGHToken();
   const lines=[
-    'Initialising JARVIS core systems…',
+    'Initialising J.A.R.V.I.S core systems…',
     'Neural network online. All subsystems nominal.',
-    `Good day, Sir. JARVIS v9 is fully operational.\n\nMemories loaded: ${_memories.length} entries. ${hasToken?'GitHub sync active.':'⚠ Set GitHub Token for cross-device memory.'}\n\nMicrophone is always-on — just speak. Say "Jarvis" to address me. Say "stop" to silence me.\n\nHow may I be of service?`
+    `Good day, Sir. J.A.R.V.I.S v9 is fully operational.\n\nMemories loaded: ${_memories.length} entries. ${hasToken?'GitHub sync active.':'⚠ Set GitHub Token for cross-device memory.'}\n\nMicrophone is always-on — just speak. Say "Jarvis" to address me. Say "stop" to silence me.\n\nHow may I be of service?`
   ];
   for(let i=0;i<lines.length;i++){
     await new Promise(r=>setTimeout(r,i===0?300:800));
@@ -1690,7 +1711,7 @@ async function boot(){
   }
   setOrbMode('speaking');
   speakJarvis(
-    'Good day Sir. JARVIS version 9 is fully operational. Microphone is always on. Just say Jarvis to address me. How may I be of service?',
+    'Good day Sir. J.A.R.V.I.S version 9 is fully operational. Microphone is always on. Just say Jarvis to address me. How may I be of service?',
     ()=>{
       setOrbMode('idle');
       isBusy=false;
