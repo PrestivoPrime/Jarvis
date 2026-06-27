@@ -249,7 +249,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <div id="app">
   <!-- HEADER -->
   <header>
-    <div class="h-brand"><div class="h-dot"></div><div class="h-name">J.A.R.V.I.S <span>· SYSTEM ONLINE</span></div></div>
+    <div class="h-brand"><div class="h-dot"></div><div class="h-name">JARVIS <span>· SYSTEM ONLINE</span></div></div>
     <div class="h-center">
       <span id="engine-label" style="color:var(--text3);font-size:0.7rem;letter-spacing:0.06em;"></span>
       <span id="clock-el">--:--:--</span>
@@ -1083,7 +1083,7 @@ function needsWebSearch(msg){
 // ══════════════════════════════════════════════════
 //  AI ENGINE — 7-model fallback + web search
 // ══════════════════════════════════════════════════
-const SYSTEM_PROMPT=`You are JARVIS, an Intelligent advanced personal AI assistant modelled after the AI from Iron Man. Sophisticated, precise, occasionally witty, always professional.
+const SYSTEM_PROMPT=`You are JARVIS an Intelligent and highly advanced personal AI assistant modelled after the AI from Iron Man. Sophisticated, precise, occasionally witty, always professional.
 
 Rules:
 - Address the user as "Sir" occasionally
@@ -1207,8 +1207,9 @@ async function sendMessage(text){
   showTyping();
   sendBtn.disabled=true;
   isBusy=true;
-  // Stop mic while processing so it doesn't pick up Jarvis speaking
-  stopListening();
+  // isBusy=true is enough — the mic's onend restart logic checks this flag
+  // before restarting, so we don't need to explicitly stop the mic here.
+  // Stopping it would cause a visible UI flicker (mic off→on) on every message.
   setOrbMode('thinking');
 
   try{
@@ -1228,8 +1229,9 @@ async function sendMessage(text){
     setOrbMode('speaking');
     speakJarvis(reply,()=>{
       setOrbMode('idle');
-      // Restart always-on mic after Jarvis finishes speaking
-      if(alwaysOnMic&&!micActive) setTimeout(()=>startListening(),400);
+      // isBusy and jarvisSpeaking will be false by the time this fires,
+      // so the mic's own onend→tryRestart will handle resuming automatically.
+      // No manual startListening() call needed here.
     });
   }catch(err){
     removeTyping();
@@ -1311,154 +1313,152 @@ function shouldRespond(transcript){
   return false;
 }
 
-function startListening(){
-  // Guards — never start if already active, busy, or always-on is off
-  if(!alwaysOnMic) return;
-  if(micActive) return;
-  if(isBusy) return;
-  if(jarvisSpeaking) return;
-  if(!(window.SpeechRecognition||window.webkitSpeechRecognition)) return;
+// ══════════════════════════════════════════════════
+//  ALWAYS-ON MIC — single persistent recognition object
+//
+//  Design rules:
+//  1. One recognition object is created once and reused forever.
+//  2. onend ONLY calls .start() again — it NEVER touches the UI,
+//     NEVER nulls the object, NEVER changes micActive.
+//  3. The UI (micActive / button / bar) only changes when the USER
+//     clicks the toggle button. Nothing else may call setMicState().
+//  4. While isBusy or jarvisSpeaking, onend defers restart via a
+//     short poll — it still does NOT touch the UI.
+// ══════════════════════════════════════════════════
 
-  // Debounce — prevent rapid restart loops
-  if(startListening._pending) return;
-  startListening._pending = true;
-  setTimeout(()=>{ startListening._pending=false; }, 800);
+function _buildRecognition(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR) return null;
 
-  const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
+  const r = new SR();
+  r.lang            = 'en-ZA';
+  r.interimResults  = true;
+  r.maxAlternatives = 1;
+  r.continuous      = true;   // ask browser to keep running
 
-  // Reuse existing recognition object if possible to avoid flicker
-  if(!recognition){
-    recognition = new SR();
-    recognition.lang='en-ZA';
-    recognition.interimResults=true;
-    recognition.maxAlternatives=1;
-    recognition.continuous=true;
+  // onstart — mic is now actually open
+  r.onstart = () => {
+    // Only update UI if the user intends the mic to be on
+    if(alwaysOnMic) setMicState(true);
+  };
 
-    recognition.onstart=()=>{
-      setMicState(true);
-    };
+  // onresult — handle speech
+  r.onresult = e => {
+    let finalText = '', interimText = '';
+    for(let i = e.resultIndex; i < e.results.length; i++){
+      const t = e.results[i][0].transcript;
+      if(e.results[i].isFinal) finalText += t;
+      else interimText += t;
+    }
+    const combined = (finalText || interimText).trim();
+    if(combined) inputEl.value = combined;
 
-    recognition.onresult=e=>{
-      let finalText='', interimText='';
-      for(let i=e.resultIndex;i<e.results.length;i++){
-        const t=e.results[i][0].transcript;
-        if(e.results[i].isFinal) finalText+=t;
-        else interimText+=t;
-      }
-      const combined=(finalText||interimText).trim();
-      if(combined) inputEl.value=combined;
+    // STOP WORD — silence Jarvis instantly
+    if(STOP_WORDS.test(combined)){
+      stopJarvis();
+      inputEl.value = '';
+      clearTimeout(silenceTimer);
+      return;
+    }
 
-      // STOP WORD — instant silence
-      if(STOP_WORDS.test(combined)){
-        stopJarvis();
-        inputEl.value='';
-        clearTimeout(silenceTimer);
+    clearTimeout(silenceTimer);
+
+    if(finalText.trim()){
+      lastFinalTranscript = finalText.trim();
+      silenceTimer = setTimeout(()=>{
+        const cap = inputEl.value.trim();
+        if(!cap) return;
+        if(!shouldRespond(cap)){ inputEl.value=''; return; }
+        inputEl.value = '';
+        sendMessage(cap);
+      }, SILENCE_DELAY);
+    }
+  };
+
+  // onend — browser closed the session (timeout, network tick, etc.)
+  // NEVER touch UI here. Just restart if alwaysOnMic is on.
+  r.onend = () => {
+    if(!alwaysOnMic) return;           // user toggled off — stay silent
+    // If busy or speaking, wait briefly then retry
+    const tryRestart = () => {
+      if(!alwaysOnMic) return;         // could have been toggled off while waiting
+      if(isBusy || jarvisSpeaking){
+        setTimeout(tryRestart, 400);
         return;
       }
-
-      clearTimeout(silenceTimer);
-
-      if(finalText.trim()){
-        lastFinalTranscript=finalText.trim();
-        silenceTimer=setTimeout(()=>{
-          const cap=inputEl.value.trim();
-          if(!cap) return;
-          if(!shouldRespond(cap)){ inputEl.value=''; return; }
-          inputEl.value='';
-          sendMessage(cap);
-        }, SILENCE_DELAY);
+      try{ r.start(); }catch(err){
+        // InvalidStateError = already running (race) — ignore
+        // Any other error: wait a beat and try again
+        if(err.name !== 'InvalidStateError'){
+          setTimeout(tryRestart, 800);
+        }
       }
     };
+    setTimeout(tryRestart, 300);
+  };
 
-    recognition.onend=()=>{
-      // FIX: do NOT null recognition here and do NOT call startListening().
-      // The heartbeat interval below is the single authority that decides
-      // when to restart — this eliminates the null→startListening→onend loop.
-      setMicState(false);
-      recognition._ended = true; // flag so heartbeat knows it stopped
+  // onerror — handle only fatal errors; non-fatal ones let onend handle restart
+  r.onerror = e => {
+    clearTimeout(silenceTimer);
+    if(e.error === 'no-speech' || e.error === 'aborted'){
+      // Non-fatal — onend will fire next and restart silently
+      return;
+    }
+    // Fatal — inform user and disable always-on so we don't loop on a broken state
+    const errs = {
+      'not-allowed'       : '⛔ Mic permission denied, Sir. Please allow microphone access in your browser.',
+      'audio-capture'     : '⛔ No microphone found, Sir. Please connect one.',
+      'service-not-allowed': '⛔ Voice blocked — Jarvis requires HTTPS. Use the GitHub Pages URL.',
+      'network'           : 'Network error on voice input, Sir.',
     };
+    const m = errs[e.error] || ('Voice error: ' + e.error);
+    alwaysOnMic = false;
+    setMicState(false);
+    appendMsg('jarvis', m);
+    addLog('Voice fatal error: ' + e.error, 'err');
+  };
 
-    recognition.onerror=e=>{
-      clearTimeout(silenceTimer);
-      setMicState(false);
-      recognition._ended = true; // heartbeat will restart if appropriate
-      // no-speech and aborted are normal during always-on — heartbeat handles restart
-      if(e.error==='no-speech'||e.error==='aborted') return;
-      // Fatal errors — disable always-on and inform the user
-      const errs={
-        'not-allowed':'⛔ Mic permission denied, Sir. Please allow microphone access.',
-        'network':'Network error on voice input.',
-        'audio-capture':'No microphone found.',
-        'service-not-allowed':'⛔ Voice blocked — Jarvis requires HTTPS.'
-      };
-      const m=errs[e.error];
-      if(m){
-        alwaysOnMic=false; // stop heartbeat trying to restart a fatally broken mic
-        recognition=null;
-        setMicState(false);
-        appendMsg('jarvis',m);
-        addLog('Voice error: '+e.error,'err');
-      }
-    };
+  return r;
+}
+
+function startListening(){
+  if(!alwaysOnMic) return;
+  if(!(window.SpeechRecognition || window.webkitSpeechRecognition)){
+    appendMsg('jarvis','⚠ Voice input requires Chrome or Edge, Sir.');
+    return;
   }
-
+  // Build the object once — reuse forever
+  if(!recognition) recognition = _buildRecognition();
   try{
-    recognition._ended = false;
     recognition.start();
   }catch(err){
-    // InvalidStateError means it's already running — that's fine, do nothing
-    if(err.name!=='InvalidStateError'){
-      recognition._ended = true;
-      setMicState(false);
+    // InvalidStateError = already running — that's fine, do nothing
+    if(err.name !== 'InvalidStateError'){
+      addLog('Mic start error: '+err.message,'warn');
     }
   }
 }
 
-// ── MIC HEARTBEAT ─────────────────────────────────────────────────────────
-// Single interval that owns all restart decisions. No setTimeout chains.
-// Fires every 1 600 ms — checks if recognition has stopped and conditions
-// allow a restart. This replaces every setTimeout(startListening,…) call
-// that was previously scattered across onend / onerror.
-// ──────────────────────────────────────────────────────────────────────────
-(function initMicHeartbeat(){
-  setInterval(()=>{
-    if(!alwaysOnMic)       return; // user disabled mic
-    if(isBusy)             return; // waiting for AI response
-    if(jarvisSpeaking)     return; // Jarvis is talking
-    if(micActive)          return; // already listening (onstart fired, onend hasn't)
-    if(startListening._pending) return; // debounce still cooling down
-
-    // If recognition exists but has ended (._ended flag), null it so a
-    // fresh object is created, preventing InvalidStateError on .start()
-    if(recognition && recognition._ended){
-      recognition = null;
-    }
-
-    // Only restart if recognition is gone (cleanly ended or never started)
-    if(!recognition){
-      startListening();
-    }
-  }, 1600);
-})();
-
 function stopListening(){
+  // Hard stop — used only when user explicitly toggles mic OFF
   if(recognition){
     try{ recognition.abort(); }catch(e){}
-    recognition=null;
+    // Do NOT null recognition — we reuse the same object when user turns it back on
   }
   setMicState(false);
 }
 
 function toggleMic(){
   if(alwaysOnMic){
-    alwaysOnMic=false;
+    // User is turning mic OFF
+    alwaysOnMic = false;
     stopListening();
-    micBtn.title='Mic off — click to enable always-on';
-    micBtn.textContent='🎙️';
+    micBtn.title = 'Mic off — click to enable always-on listening';
     addLog('Always-on mic: OFF','warn');
   } else {
-    alwaysOnMic=true;
-    micBtn.title='Always-on mic — click to disable';
+    // User is turning mic ON
+    alwaysOnMic = true;
+    micBtn.title = 'Always-on mic active — click to disable';
     addLog('Always-on mic: ON','ok');
     startListening();
   }
@@ -1608,18 +1608,8 @@ function speakJarvis(text, onEnd, brief=false){
         utt.rate  = 0.95;
         utt.pitch = 0.78;
     }
-    utt.onend   = () => { clearTimeout(uttWatchdog); speakNext(idx+1); };
-    utt.onerror = () => { clearTimeout(uttWatchdog); speakNext(idx+1); };
-
-    // WATCHDOG — if onend never fires (browser bug on long queues), force-advance
-    // after (estimated speech duration + 4 s) so jarvisSpeaking never stays true.
-    const wordCount   = spoken.split(/\s+/).length;
-    const rateAtPlay  = utt.rate || 0.95;
-    const estMs       = Math.max(4000, (wordCount / (rateAtPlay * 2.5)) * 1000 + 4000);
-    const uttWatchdog = setTimeout(()=>{
-      addLog('TTS watchdog fired — forcing advance','warn');
-      speakNext(idx+1);
-    }, estMs);
+    utt.onend   = () => speakNext(idx+1);
+    utt.onerror = () => speakNext(idx+1);
     window.speechSynthesis.speak(utt);
   }
   speakNext(0);
@@ -1694,7 +1684,7 @@ async function boot(){
   const memLoaded = await loadMemoriesFromGist();
   const hasToken = !!getGHToken();
   const lines=[
-    'Initialising J.A.R.V.I.S core systems…',
+    'Initialising JARVIS core systems…',
     'Neural network online. All subsystems nominal.',
     `Good day, Sir. JARVIS is fully operational.\n\nMemories loaded: ${_memories.length} entries. ${hasToken?'GitHub sync active.':'⚠ Set GitHub Token for cross-device memory.'}\n\nHow may I be of service?`
   ];
@@ -1705,12 +1695,13 @@ async function boot(){
   }
   setOrbMode('speaking');
   speakJarvis(
-    'Good day Sir. JARVIS version 9 is fully operational. Microphone is always on. Just say Jarvis to address me. How may I be of service?',
+    'Good day Sir. JARVIS is fully operational. How may I be of service?',
     ()=>{
       setOrbMode('idle');
       isBusy=false;
-      // Start always-on mic after boot greeting finishes
-      setTimeout(()=>startListening(), 800);
+      // isBusy is now false — startListening handles the initial mic open.
+      // Called once here to get the session going; after this onend manages itself.
+      startListening();
     }
   );
   if(!hasToken){
