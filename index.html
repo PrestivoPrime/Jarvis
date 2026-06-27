@@ -1207,11 +1207,8 @@ async function sendMessage(text){
   showTyping();
   sendBtn.disabled=true;
   isBusy=true;
-  // Pause always-on mic while processing to avoid picking up Jarvis's voice
-  if(recognition&&alwaysOnMic){
-    try{ recognition.abort(); }catch(e){}
-    setMicState(false);
-  }
+  // Stop mic while processing so it doesn't pick up Jarvis speaking
+  stopListening();
   setOrbMode('thinking');
 
   try{
@@ -1251,10 +1248,6 @@ async function sendMessage(text){
   sendBtn.disabled=false;
   isBusy=false;
   inputEl.focus();
-  // Restart mic if always-on (only if Jarvis isn't about to speak)
-  if(alwaysOnMic&&!jarvisSpeaking&&!micActive){
-    setTimeout(()=>startListening(),600);
-  }
 }
 
 function quickCmd(t){inputEl.value=t;sendMessage(t);}
@@ -1319,105 +1312,127 @@ function shouldRespond(transcript){
 }
 
 function startListening(){
-  if(micActive||isBusy) return;
+  // Guards — never start if already active, busy, or always-on is off
+  if(!alwaysOnMic) return;
+  if(micActive) return;
+  if(isBusy) return;
+  if(jarvisSpeaking) return;
   if(!(window.SpeechRecognition||window.webkitSpeechRecognition)) return;
 
-  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-  recognition=new SR();
-  recognition.lang='en-ZA';
-  recognition.interimResults=true;
-  recognition.maxAlternatives=1;
-  recognition.continuous=true; // keep listening, don't auto-stop
+  // Debounce — prevent rapid restart loops
+  if(startListening._pending) return;
+  startListening._pending = true;
+  setTimeout(()=>{ startListening._pending=false; }, 800);
 
-  recognition.onstart=()=>{ setMicState(true); addLog('Listening…','ok'); };
+  const SR = window.SpeechRecognition||window.webkitSpeechRecognition;
 
-  recognition.onresult=e=>{
-    let finalText='', interimText='';
-    for(let i=e.resultIndex;i<e.results.length;i++){
-      const t=e.results[i][0].transcript;
-      if(e.results[i].isFinal) finalText+=t;
-      else interimText+=t;
-    }
+  // Reuse existing recognition object if possible to avoid flicker
+  if(!recognition){
+    recognition = new SR();
+    recognition.lang='en-ZA';
+    recognition.interimResults=true;
+    recognition.maxAlternatives=1;
+    recognition.continuous=true;
 
-    const combined=(finalText||interimText).trim();
-    inputEl.value=combined;
-
-    // STOP WORD — instant speech cancellation
-    if(STOP_WORDS.test(combined)){
-      stopJarvis();
-      inputEl.value='';
-      clearTimeout(silenceTimer);
-      return;
-    }
-
-    // Clear previous silence timer on new speech
-    clearTimeout(silenceTimer);
-
-    // Only set submit timer when we have a final result
-    if(finalText.trim()){
-      lastFinalTranscript=finalText.trim();
-      // Silence delay — wait for user to finish their full sentence
-      silenceTimer=setTimeout(()=>{
-        const cap=inputEl.value.trim();
-        if(!cap) return;
-        // Deduplicate — ignore if same as last submitted
-        if(cap===lastFinalTranscript&&msgCount>0&&cap.length<8) return;
-        // Context/trigger check — only respond if addressed or in context
-        if(!shouldRespond(cap)){
-          inputEl.value='';
-          return;
-        }
-        inputEl.value='';
-        sendMessage(cap);
-      }, SILENCE_DELAY);
-    }
-  };
-
-  recognition.onend=()=>{
-    setMicState(false);
-    // Always-on: restart automatically after a brief pause
-    if(alwaysOnMic&&!isBusy){
-      setTimeout(()=>startListening(), 300);
-    }
-  };
-
-  recognition.onerror=e=>{
-    setMicState(false);
-    clearTimeout(silenceTimer);
-    const ignore=['no-speech','aborted'];
-    if(ignore.includes(e.error)){
-      // Silently restart for these non-errors
-      if(alwaysOnMic&&!isBusy) setTimeout(()=>startListening(),500);
-      return;
-    }
-    const errs={
-      'not-allowed':'⛔ Mic permission denied, Sir.',
-      'network':'Network error on voice input.',
-      'audio-capture':'No microphone found.',
-      'service-not-allowed':'⛔ Voice blocked — please use HTTPS.'
+    recognition.onstart=()=>{
+      setMicState(true);
     };
-    const m=errs[e.error];
-    if(m){ appendMsg('jarvis',m); addLog('Voice error: '+e.error,'err'); }
-  };
 
-  try{ recognition.start(); }
-  catch(err){ setMicState(false); }
+    recognition.onresult=e=>{
+      let finalText='', interimText='';
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        const t=e.results[i][0].transcript;
+        if(e.results[i].isFinal) finalText+=t;
+        else interimText+=t;
+      }
+      const combined=(finalText||interimText).trim();
+      if(combined) inputEl.value=combined;
+
+      // STOP WORD — instant silence
+      if(STOP_WORDS.test(combined)){
+        stopJarvis();
+        inputEl.value='';
+        clearTimeout(silenceTimer);
+        return;
+      }
+
+      clearTimeout(silenceTimer);
+
+      if(finalText.trim()){
+        lastFinalTranscript=finalText.trim();
+        silenceTimer=setTimeout(()=>{
+          const cap=inputEl.value.trim();
+          if(!cap) return;
+          if(!shouldRespond(cap)){ inputEl.value=''; return; }
+          inputEl.value='';
+          sendMessage(cap);
+        }, SILENCE_DELAY);
+      }
+    };
+
+    recognition.onend=()=>{
+      // onend fires normally — only restart if always-on is still enabled
+      // and we're not busy/speaking. Use a longer delay to prevent loop.
+      setMicState(false);
+      recognition=null; // allow fresh object next time
+      if(alwaysOnMic&&!isBusy&&!jarvisSpeaking){
+        setTimeout(()=>startListening(), 1200);
+      }
+    };
+
+    recognition.onerror=e=>{
+      clearTimeout(silenceTimer);
+      setMicState(false);
+      recognition=null;
+      // no-speech and aborted are not real errors — restart quietly
+      if(e.error==='no-speech'||e.error==='aborted'){
+        if(alwaysOnMic&&!isBusy&&!jarvisSpeaking){
+          setTimeout(()=>startListening(), 1500);
+        }
+        return;
+      }
+      const errs={
+        'not-allowed':'⛔ Mic permission denied, Sir. Please allow microphone access.',
+        'network':'Network error on voice input.',
+        'audio-capture':'No microphone found.',
+        'service-not-allowed':'⛔ Voice blocked — Jarvis requires HTTPS.'
+      };
+      const m=errs[e.error];
+      if(m){ appendMsg('jarvis',m); addLog('Voice error: '+e.error,'err'); }
+    };
+  }
+
+  try{
+    recognition.start();
+  }catch(err){
+    // InvalidStateError means it's already running — that's fine
+    if(err.name!=='InvalidStateError'){
+      recognition=null;
+      setMicState(false);
+    }
+  }
+}
+
+function stopListening(){
+  if(recognition){
+    try{ recognition.abort(); }catch(e){}
+    recognition=null;
+  }
+  setMicState(false);
 }
 
 function toggleMic(){
   if(alwaysOnMic){
-    // Toggle always-on mode off → manual mode
     alwaysOnMic=false;
-    if(recognition) try{ recognition.abort(); }catch(e){}
-    setMicState(false);
-    micBtn.title='Click to speak (always-on disabled)';
+    stopListening();
+    micBtn.title='Mic off — click to enable always-on';
+    micBtn.textContent='🎙️';
     addLog('Always-on mic: OFF','warn');
   } else {
-    // Toggle back to always-on
     alwaysOnMic=true;
-    micBtn.title='Click to disable always-on mic';
-    startListening();
+    micBtn.title='Always-on mic — click to disable';
     addLog('Always-on mic: ON','ok');
+    startListening();
   }
 }
 
@@ -1636,6 +1651,7 @@ function openUpdatePrompt(){
 }
 
 async function boot(){
+  isBusy=true; // prevent mic starting during boot
   setOrbMode('thinking');
   const memLoaded = await loadMemoriesFromGist();
   const hasToken = !!getGHToken();
@@ -1654,10 +1670,9 @@ async function boot(){
     'Good day Sir. J.A.R.V.I.S version 9 is fully operational. Microphone is always on. Just say Jarvis to address me. How may I be of service?',
     ()=>{
       setOrbMode('idle');
-      // Start always-on mic after boot greeting
-      if(window.SpeechRecognition||window.webkitSpeechRecognition){
-        setTimeout(()=>startListening(), 600);
-      }
+      isBusy=false;
+      // Start always-on mic after boot greeting finishes
+      setTimeout(()=>startListening(), 800);
     }
   );
   if(!hasToken){
