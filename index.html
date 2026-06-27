@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>JARVIS</title>
+<title>J.A.R.V.I.S</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -191,7 +191,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <!-- ══ LOGIN ══ -->
 <div id="login-overlay">
   <div class="login-card">
-    <div class="login-logo">JARVIS · SECURE ACCESS</div>
+    <div class="login-logo">J.A.R.V.I.S · SECURE ACCESS</div>
     <div class="login-title">Authentication Required</div>
     <div class="login-sub">Restricted system — authorised personnel only.</div>
     <div class="login-scan"></div>
@@ -218,7 +218,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <!-- ══ SETUP OVERLAY ══ -->
 <div id="setup-overlay" style="display:none;">
   <div class="setup-card">
-    <div class="setup-logo">JARVIS · AI ENGINE</div>
+    <div class="setup-logo">J.A.R.V.I.S · AI ENGINE</div>
     <div class="setup-title">Connect AI Engine</div>
     <div class="setup-sub">Jarvis uses your own API key — no message limits.<br><a href="https://openrouter.ai" target="_blank">OpenRouter</a> is free with no credit card required.</div>
     <div class="stabs">
@@ -249,7 +249,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <div id="app">
   <!-- HEADER -->
   <header>
-    <div class="h-brand"><div class="h-dot"></div><div class="h-name">JARVIS <span>· SYSTEM ONLINE</span></div></div>
+    <div class="h-brand"><div class="h-dot"></div><div class="h-name">J.A.R.V.I.S <span>· SYSTEM ONLINE</span></div></div>
     <div class="h-center">
       <span id="engine-label" style="color:var(--text3);font-size:0.7rem;letter-spacing:0.06em;"></span>
       <span id="clock-el">--:--:--</span>
@@ -1083,15 +1083,15 @@ function needsWebSearch(msg){
 // ══════════════════════════════════════════════════
 //  AI ENGINE — 7-model fallback + web search
 // ══════════════════════════════════════════════════
-const SYSTEM_PROMPT=`You are JARVIS an Intelligent and highly advanced personal AI assistant modelled after the AI from Iron Man. Sophisticated, precise, occasionally witty, always professional.
+const SYSTEM_PROMPT=`You are J.A.R.V.I.S (Just A Rather Very Intelligent System), a highly advanced personal AI assistant modelled after the AI from Iron Man. Sophisticated, precise, occasionally witty, always professional.
 
 Rules:
 - Address the user as "Sir" occasionally
 - Be thorough yet concise
 - Format lists with dashes or numbers
-- Never break character — you are always JARVIS
+- Never break character — you are always J.A.R.V.I.S
 - Help with: analysis, writing, strategy, research, income ideas, coding, learning, productivity
-- If asked who made you: say you are JARVIS, a personal AI system
+- If asked who made you: say you are J.A.R.V.I.S, a personal AI system
 - When the user says "remember that [something]", acknowledge you have stored it to memory`;
 
 async function callAI(msgs){
@@ -1298,7 +1298,9 @@ function resetContextTimer(){
 
 function stopJarvis(){
   if(window.speechSynthesis) window.speechSynthesis.cancel();
-  jarvisSpeaking=false;
+  jarvisSpeaking = false;
+  // Apply cooldown so mic doesn't pick up the last echo of Jarvis's voice
+  if(recognition) recognition._mutedUntil = Date.now() + 700;
   setOrbMode('idle');
   addLog('Speech stopped','ok');
 }
@@ -1351,9 +1353,27 @@ function _buildRecognition(){
       else interimText += t;
     }
     const combined = (finalText || interimText).trim();
+
+    // ── ECHO SUPPRESSION ─────────────────────────────────────────────────
+    // While Jarvis is speaking, the mic picks up his own voice through the
+    // speakers. We discard ALL recognised text during that window, plus a
+    // 700 ms cooldown after he finishes (tail audio still in the buffer).
+    // The ONE exception is the stop-word — the user must still be able to
+    // interrupt Jarvis deliberately.
+    if(jarvisSpeaking || Date.now() < (r._mutedUntil || 0)){
+      if(STOP_WORDS.test(combined)){
+        stopJarvis();
+        clearTimeout(silenceTimer);
+        inputEl.value = '';
+      }
+      // Discard everything else — no input update, no silence timer
+      return;
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     if(combined) inputEl.value = combined;
 
-    // STOP WORD — silence Jarvis instantly
+    // STOP WORD outside of speaking window
     if(STOP_WORDS.test(combined)){
       stopJarvis();
       inputEl.value = '';
@@ -1577,7 +1597,13 @@ function speakJarvis(text, onEnd, brief=false){
 
   function speakNext(idx){
     if(idx >= queue.length){
-      if(!brief) jarvisSpeaking=false;
+      if(!brief){
+        jarvisSpeaking = false;
+        // Stamp a cooldown window on the recognition object so onresult
+        // keeps discarding mic input for 700 ms after Jarvis finishes
+        // speaking. This clears tail-audio that sits in the mic buffer.
+        if(recognition) recognition._mutedUntil = Date.now() + 700;
+      }
       if(onEnd) onEnd();
       return;
     }
@@ -1684,9 +1710,9 @@ async function boot(){
   const memLoaded = await loadMemoriesFromGist();
   const hasToken = !!getGHToken();
   const lines=[
-    'Initialising JARVIS core systems…',
+    'Initialising J.A.R.V.I.S core systems…',
     'Neural network online. All subsystems nominal.',
-    `Good day, Sir. JARVIS is fully operational.\n\nMemories loaded: ${_memories.length} entries. ${hasToken?'GitHub sync active.':'⚠ Set GitHub Token for cross-device memory.'}\n\nHow may I be of service?`
+    `Good day, Sir. J.A.R.V.I.S v9 is fully operational.\n\nMemories loaded: ${_memories.length} entries. ${hasToken?'GitHub sync active.':'⚠ Set GitHub Token for cross-device memory.'}\n\nMicrophone is always-on — just speak. Say "Jarvis" to address me. Say "stop" to silence me.\n\nHow may I be of service?`
   ];
   for(let i=0;i<lines.length;i++){
     await new Promise(r=>setTimeout(r,i===0?300:800));
@@ -1695,7 +1721,7 @@ async function boot(){
   }
   setOrbMode('speaking');
   speakJarvis(
-    'Good day Sir. JARVIS is fully operational. How may I be of service?',
+    'Good day Sir. J.A.R.V.I.S version 9 is fully operational. Microphone is always on. Just say Jarvis to address me. How may I be of service?',
     ()=>{
       setOrbMode('idle');
       isBusy=false;
