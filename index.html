@@ -353,11 +353,20 @@ function doLogin(){
     document.getElementById('login-overlay').style.display = 'none';
     err.textContent = '';
     initApp();
+  } else if(u === DEFAULT_USER && p === DEFAULT_PASS && getStoredPass() !== DEFAULT_PASS){
+    // Password was reset but user is trying default — offer reset
+    err.innerHTML = 'Password was changed. <a href="#" onclick="resetToDefault()" style="color:var(--accent);">Click here to reset to default</a>';
   } else {
     err.textContent = 'Access denied. Invalid credentials.';
     document.getElementById('l-pass').value = '';
     document.getElementById('l-pass').focus();
   }
+}
+function resetToDefault(){
+  try{ localStorage.removeItem('j_pw'); }catch(e){}
+  document.getElementById('l-err').textContent = 'Password reset to default. Use K2pass! to login.';
+  document.getElementById('l-pass').value = '';
+  document.getElementById('l-pass').focus();
 }
 function openPwModal(){ document.getElementById('pw-modal').classList.add('show'); document.getElementById('pw-new').focus(); }
 function closePwModal(){ document.getElementById('pw-modal').classList.remove('show'); document.getElementById('pw-new').value=''; }
