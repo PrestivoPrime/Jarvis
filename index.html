@@ -668,15 +668,245 @@ function drawOrb(){
 drawOrb();
 
 // ══════════════════════════════════════════════════
-//  MEMORY SYSTEM — GitHub-backed, truly persistent
-//  Reads publicly, writes with a GitHub Personal Access Token
+//  MEMORY SYSTEM — GitHub Gist backend
+//  ✅ Full CORS support from any browser/device
+//  ✅ Persists across all devices with one token
+//  ✅ No repo file needed — Gist is self-contained
 //  Falls back to localStorage if token not set
 // ══════════════════════════════════════════════════
-const GITHUB_OWNER = 'PrestivoPrime';
-const GITHUB_REPO  = 'Jarvis';
-const MEMORY_FILE  = 'memory/memories.json';
-const GH_RAW       = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/${MEMORY_FILE}`;
-const GH_API       = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${MEMORY_FILE}`;
+const GIST_FILENAME = 'jarvis_memories.json';
+const GIST_API      = 'https://api.github.com/gists';
+
+let _memories     = [];
+let _memoryLoaded = false;
+let _ghToken      = null;
+let _gistId       = null; // stored after first create
+
+function getGHToken(){
+  if(_ghToken) return _ghToken;
+  try{ _ghToken = localStorage.getItem('j_gh_token')||null; }catch(e){}
+  return _ghToken;
+}
+function getGistId(){
+  if(_gistId) return _gistId;
+  try{ _gistId = localStorage.getItem('j_gist_id')||null; }catch(e){}
+  return _gistId;
+}
+function setGHToken(t){
+  _ghToken = t;
+  try{ localStorage.setItem('j_gh_token', t); }catch(e){}
+}
+function setGistId(id){
+  _gistId = id;
+  try{ localStorage.setItem('j_gist_id', id); }catch(e){}
+}
+
+function ghHeaders(){
+  const tok = getGHToken();
+  const h = {'Content-Type':'application/json','Accept':'application/vnd.github.v3+json'};
+  if(tok) h['Authorization'] = 'token '+tok;
+  return h;
+}
+
+async function loadMemoriesFromGist(){
+  try{
+    // Try to load from localStorage first for instant display
+    try{
+      const local = JSON.parse(localStorage.getItem('j_memories')||'[]');
+      if(local.length){ _memories=local; updateMemCount(); }
+    }catch(e){}
+
+    const tok = getGHToken();
+    if(!tok){ _memoryLoaded=true; addLog('Memory: local only — set token for sync','warn'); return; }
+
+    const gistId = getGistId();
+
+    if(gistId){
+      // Fetch existing gist
+      const res = await fetch(GIST_API+'/'+gistId, {headers:ghHeaders()});
+      if(res.ok){
+        const data = await res.json();
+        const content = data.files[GIST_FILENAME]?.content || '[]';
+        _memories = JSON.parse(content) || [];
+        // Sync local cache
+        try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
+        _memoryLoaded=true;
+        updateMemCount();
+        addLog('Memory loaded from Gist: '+_memories.length+' entries','ok');
+        return;
+      } else if(res.status===404){
+        // Gist was deleted — clear stored ID and recreate
+        setGistId(null); _gistId=null;
+      }
+    }
+
+    // No gist ID stored — search for existing Jarvis gist
+    const listRes = await fetch(GIST_API+'?per_page=100', {headers:ghHeaders()});
+    if(listRes.ok){
+      const gists = await listRes.json();
+      const found = gists.find(g=>g.files&&g.files[GIST_FILENAME]);
+      if(found){
+        setGistId(found.id);
+        const content = found.files[GIST_FILENAME]?.content || '[]';
+        _memories = JSON.parse(content) || [];
+        try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
+        _memoryLoaded=true;
+        updateMemCount();
+        addLog('Gist found & loaded: '+_memories.length+' entries','ok');
+        return;
+      }
+    }
+
+    // No gist exists yet — create one
+    await createGist();
+    _memoryLoaded=true;
+    updateMemCount();
+  }catch(e){
+    try{ _memories=JSON.parse(localStorage.getItem('j_memories')||'[]'); }catch(ex){ _memories=[]; }
+    _memoryLoaded=true;
+    updateMemCount();
+    addLog('Memory load error: '+e.message,'err');
+  }
+}
+
+async function createGist(){
+  const tok = getGHToken();
+  if(!tok) return;
+  try{
+    const res = await fetch(GIST_API,{
+      method:'POST',
+      headers:ghHeaders(),
+      body:JSON.stringify({
+        description:'J.A.R.V.I.S Memory Bank — PrestivoPrime',
+        public:false,
+        files:{ [GIST_FILENAME]:{ content: JSON.stringify(_memories,null,2) } }
+      })
+    });
+    if(res.ok){
+      const d = await res.json();
+      setGistId(d.id);
+      addLog('Memory Gist created','ok');
+    } else {
+      const e=await res.json();
+      addLog('Gist create failed: '+(e.message||res.status),'err');
+    }
+  }catch(e){ addLog('Gist create error: '+e.message,'err'); }
+}
+
+async function saveMemoriesToGist(){
+  // Save locally immediately — always works, instant
+  try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
+  updateMemCount();
+
+  const tok = getGHToken();
+  if(!tok){ addLog('Memory saved locally — set token to sync across devices','warn'); return; }
+
+  const gistId = getGistId();
+  if(!gistId){ await createGist(); return; }
+
+  try{
+    const res = await fetch(GIST_API+'/'+gistId,{
+      method:'PATCH',
+      headers:ghHeaders(),
+      body:JSON.stringify({
+        files:{ [GIST_FILENAME]:{ content: JSON.stringify(_memories,null,2) } }
+      })
+    });
+    if(res.ok){
+      addLog('Memory synced to Gist ✓','ok');
+    } else {
+      const e=await res.json();
+      addLog('Gist save failed: '+(e.message||res.status),'err');
+      if(res.status===404){ setGistId(null); _gistId=null; await createGist(); }
+    }
+  }catch(e){
+    addLog('Gist save error: '+e.message,'err');
+  }
+}
+
+function getMemories(){ return _memories; }
+
+function addMemory(text){
+  if(_memories.some(m=>m.text===text)) return; // no duplicates
+  _memories.push({text, ts:new Date().toISOString()});
+  if(_memories.length>300) _memories.shift();
+  saveMemoriesToGist();
+}
+
+function saveMemories(arr){
+  _memories = arr;
+  saveMemoriesToGist();
+}
+
+function updateMemCount(){
+  const el=document.getElementById('s-mem-count');
+  if(el) el.textContent=_memories.length;
+}
+
+function showMemory(){
+  const mems=getMemories();
+  if(!mems.length){
+    appendMsg('jarvis','Memory bank is empty, Sir. Say "remember that" followed by what you want me to retain.');
+    speakJarvis('Memory bank is empty Sir.');
+    return;
+  }
+  const txt='Memory Bank — '+mems.length+' entries:\n\n'+
+    mems.map((m,i)=>`${i+1}. [${m.ts?m.ts.slice(0,10):'?'}] ${m.text}`).join('\n');
+  appendMsg('jarvis',txt);
+}
+
+function clearMemory(){
+  saveMemories([]);
+  appendMsg('jarvis','Memory bank cleared, Sir.');
+  speakJarvis('Memory bank cleared Sir.');
+}
+
+function promptGHToken(){
+  const existing = getGHToken();
+  const msg = existing
+    ? 'GitHub token is already set.\n\nEnter a new token to replace it, or leave blank to keep current:'
+    : 'Enter your GitHub Personal Access Token.\n\nCreate one at:\ngithub.com → Settings → Developer settings → Personal access tokens → Tokens (classic)\n\nScopes needed: tick ONLY "gist"\n\nPaste your token (starts with ghp_):';
+  const t = prompt(msg);
+  if(t && t.trim()){
+    setGHToken(t.trim());
+    setGistId(null); _gistId=null; // reset gist search so we find/create fresh
+    appendMsg('jarvis','GitHub token saved, Sir. Connecting to memory Gist now…');
+    loadMemoriesFromGist().then(()=>{
+      appendMsg('jarvis','Memory system connected, Sir. '+_memories.length+' memories loaded. All future memories will sync across every device.');
+      speakJarvis('Memory system connected Sir. Ready to remember.');
+    });
+  } else if(t!==null){
+    appendMsg('jarvis','No token entered, Sir. Memory will be stored locally on this device only.');
+  }
+}
+
+function checkForMemoryTrigger(msg){
+  const lower=msg.toLowerCase();
+  const idx=lower.indexOf('remember that');
+  if(idx!==-1){
+    const content=msg.slice(idx+13).trim();
+    if(content){
+      addMemory(content);
+      appendMsg('jarvis',`Stored to memory, Sir: "${content}"`);
+      speakJarvis('Noted and stored to memory Sir.');
+      return true;
+    }
+  }
+  return false;
+}
+
+async function autoLearn(userMsg, jarvisReply){
+  if(msgCount % 5 !== 0) return;
+  try{
+    const prompt=`Extract 0-2 important persistent facts about the user from this exchange. Output ONLY a JSON array of short strings under 150 chars each. If nothing worth storing output []. No explanation.\n\nUser: "${userMsg.slice(0,250)}"\nAssistant: "${jarvisReply.slice(0,250)}"`;
+    const res=await callAI([{role:'user',content:prompt}]);
+    const clean=res.replace(/```json|```/g,'').trim();
+    const facts=JSON.parse(clean);
+    if(Array.isArray(facts)){
+      facts.forEach(f=>{if(typeof f==='string'&&f.length>4&&f.length<200)addMemory('[auto] '+f);});
+    }
+  }catch(e){ /* silent */ }
+}
 
 let _memorySHA    = null;
 let _memories     = [];
@@ -870,7 +1100,7 @@ function showSetup(){document.getElementById('setup-overlay').style.display='fle
 
 function initApp(){
   // Load memories from GitHub (cross-device persistent)
-  loadMemoriesFromGitHub();
+  loadMemoriesFromGist();
   try{
     const k=localStorage.getItem('jarvis_key');
     const e=localStorage.getItem('jarvis_engine');
@@ -1546,7 +1776,7 @@ function openUpdatePrompt(){
 
 async function boot(){
   setOrbMode('thinking');
-  const memLoaded = await loadMemoriesFromGitHub();
+  const memLoaded = await loadMemoriesFromGist();
   const hasToken = !!getGHToken();
   const lines=[
     'Initialising J.A.R.V.I.S core systems…',
