@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>JARVIS</title>
+<title>J.A.R.V.I.S</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -266,8 +266,10 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
       <button class="q-btn" onclick="toggleChatPanel()"><span class="qi">💬</span>Messages</button>
       <button class="q-btn" onclick="openPwModal()"><span class="qi">🔑</span>Reset Password</button>
       <button class="q-btn" onclick="diagnoseVoice()"><span class="qi">🎙️</span>Voice Info</button>
+      <button class="q-btn" onclick="promptGHToken()"><span class="qi">🔐</span>Set GitHub Token</button>
       <button class="q-btn" onclick="downloadSelf()"><span class="qi">💾</span>Download Jarvis</button>
       <button class="q-btn" onclick="openUpdatePrompt()"><span class="qi">🔧</span>Update Jarvis Code</button>
+      <button class="q-btn" onclick="quickCmd('Search the web: latest AI news today')"><span class="qi">🌍</span>Web Search</button>
       <button class="q-btn" onclick="showMemory()"><span class="qi">🧬</span>Memory Bank</button>
       <button class="q-btn" onclick="clearMemory()"><span class="qi">🗑️</span>Clear Memory</button>
       <button class="q-btn" onclick="quickCmd('Give me a full status report.')"><span class="qi">📡</span>Status Report</button>
@@ -288,7 +290,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
   <div class="main-col">
     <div class="orb-area" id="orb-area">
       <canvas id="orb-canvas" width="560" height="560" title="Click to speak"></canvas>
-      <div class="orb-label">JARVIS</div>
+      <div class="orb-label">J.A.R.V.I.S</div>
       <div class="orb-state" id="orb-state">Standby</div>
     </div>
     <div id="chat-panel">
@@ -377,6 +379,14 @@ let chatPanelOpen=false;
 let jarvisSpeaking=false;
 let jarvisVoice=null;
 let leftCollapsed=false, rightCollapsed=false;
+let alwaysOnMic=true;          // mic stays on after each response
+let silenceTimer=null;         // delay before mic submits
+let lastInterimText='';        // track interim for silence detection
+let isBusy=false;              // true while AI is processing — ignore ambient speech
+let inContext=false;           // true while in active conversation context
+let contextTimer=null;         // resets context after inactivity
+let lastFinalTranscript='';    // deduplicate rapid repeats
+let sessionId=Date.now();      // for session state tracking
 const startTime=Date.now();
 
 const chatEl    = document.getElementById('chat');
@@ -658,25 +668,124 @@ function drawOrb(){
 drawOrb();
 
 // ══════════════════════════════════════════════════
-//  MEMORY SYSTEM (localStorage-based)
+//  MEMORY SYSTEM — GitHub-backed, truly persistent
+//  Reads publicly, writes with a GitHub Personal Access Token
+//  Falls back to localStorage if token not set
 // ══════════════════════════════════════════════════
-function getMemories(){
-  try{ return JSON.parse(localStorage.getItem('j_memories')||'[]'); }catch(e){ return []; }
+const GITHUB_OWNER = 'PrestivoPrime';
+const GITHUB_REPO  = 'Jarvis';
+const MEMORY_FILE  = 'memory/memories.json';
+const GH_RAW       = `https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}/main/${MEMORY_FILE}`;
+const GH_API       = `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/contents/${MEMORY_FILE}`;
+
+let _memorySHA    = null;
+let _memories     = [];
+let _memoryLoaded = false;
+let _ghToken      = null; // GitHub Personal Access Token for writes
+
+function getGHToken(){
+  if(_ghToken) return _ghToken;
+  try{ _ghToken = localStorage.getItem('j_gh_token')||null; }catch(e){}
+  return _ghToken;
 }
-function saveMemories(arr){
-  try{ localStorage.setItem('j_memories',JSON.stringify(arr)); }catch(e){}
+function setGHToken(t){
+  _ghToken = t;
+  try{ localStorage.setItem('j_gh_token', t); }catch(e){}
+}
+
+async function loadMemoriesFromGitHub(){
+  try{
+    // Read from raw URL — no auth needed for public repo
+    const res = await fetch(GH_RAW+'?t='+Date.now());
+    if(!res.ok) throw new Error('HTTP '+res.status);
+    _memories = await res.json() || [];
+    // Also fetch SHA for later writes
+    fetchMemorySHA();
+    _memoryLoaded = true;
+    updateMemCount();
+    addLog('Memory loaded: '+_memories.length+' entries','ok');
+    return true;
+  }catch(e){
+    // Fallback to localStorage
+    try{ _memories = JSON.parse(localStorage.getItem('j_memories')||'[]'); }catch(ex){ _memories=[]; }
+    _memoryLoaded = true;
+    updateMemCount();
+    addLog('Memory: local only (no GitHub yet)','warn');
+    return false;
+  }
+}
+
+async function fetchMemorySHA(){
+  try{
+    const headers={'Accept':'application/vnd.github.v3+json'};
+    const tok = getGHToken();
+    if(tok) headers['Authorization']='token '+tok;
+    const res = await fetch(GH_API, {headers});
+    if(res.ok){ const d=await res.json(); _memorySHA=d.sha; }
+  }catch(e){}
+}
+
+async function saveMemoriesToGitHub(){
+  // Always save locally first — instant
+  try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
   updateMemCount();
+
+  const tok = getGHToken();
+  if(!tok){
+    addLog('Memory saved locally — set GitHub token for cross-device sync','warn');
+    return;
+  }
+
+  try{
+    if(!_memorySHA) await fetchMemorySHA();
+    const content = btoa(unescape(encodeURIComponent(JSON.stringify(_memories, null, 2))));
+    const body = {
+      message:'Memory update '+new Date().toISOString(),
+      content,
+      ...(_memorySHA ? {sha:_memorySHA} : {})
+    };
+    const res = await fetch(GH_API,{
+      method:'PUT',
+      headers:{
+        'Content-Type':'application/json',
+        'Accept':'application/vnd.github.v3+json',
+        'Authorization':'token '+tok
+      },
+      body: JSON.stringify(body)
+    });
+    if(res.ok){
+      const d = await res.json();
+      _memorySHA = d.content.sha;
+      addLog('Memory synced to GitHub','ok');
+    } else {
+      const e = await res.json();
+      addLog('GitHub write failed: '+(e.message||res.status),'err');
+    }
+  }catch(e){
+    addLog('Memory save error: '+e.message,'err');
+  }
 }
+
+function getMemories(){ return _memories; }
+
 function addMemory(text){
-  const mems=getMemories();
-  mems.push({text,ts:new Date().toISOString()});
-  if(mems.length>200)mems.shift();
-  saveMemories(mems);
+  // Avoid duplicate entries
+  if(_memories.some(m=>m.text===text)) return;
+  _memories.push({text, ts:new Date().toISOString()});
+  if(_memories.length>300) _memories.shift();
+  saveMemoriesToGitHub();
 }
+
+function saveMemories(arr){
+  _memories = arr;
+  saveMemoriesToGitHub();
+}
+
 function updateMemCount(){
   const el=document.getElementById('s-mem-count');
-  if(el)el.textContent=getMemories().length;
+  if(el) el.textContent=_memories.length;
 }
+
 function showMemory(){
   const mems=getMemories();
   if(!mems.length){
@@ -684,39 +793,49 @@ function showMemory(){
     speakJarvis('Memory bank is empty Sir.');
     return;
   }
-  const txt='Memory Bank — '+mems.length+' entries:\n\n'+mems.map((m,i)=>`${i+1}. ${m.text}`).join('\n');
+  const txt='Memory Bank — '+mems.length+' entries:\n\n'+mems.map((m,i)=>`${i+1}. [${m.ts?m.ts.slice(0,10):'?'}] ${m.text}`).join('\n');
   appendMsg('jarvis',txt);
 }
+
 function clearMemory(){
   saveMemories([]);
-  appendMsg('jarvis','Memory bank cleared, Sir. All stored memories have been wiped.');
+  appendMsg('jarvis','Memory bank cleared, Sir.');
   speakJarvis('Memory bank cleared Sir.');
 }
+
+function promptGHToken(){
+  const t = prompt('Enter your GitHub Personal Access Token for cross-device memory sync.\n\nGet one at: github.com → Settings → Developer settings → Personal access tokens → Tokens (classic)\nScopes needed: repo (read & write)\n\nLeave blank to use local-only memory:');
+  if(t && t.trim()){ setGHToken(t.trim()); appendMsg('jarvis','GitHub token saved, Sir. Memory will now sync across all devices.'); saveMemoriesToGitHub(); }
+  else appendMsg('jarvis','No token entered. Memory will be stored locally only on this device.');
+}
+
 function checkForMemoryTrigger(msg){
   const lower=msg.toLowerCase();
   const idx=lower.indexOf('remember that');
   if(idx!==-1){
     const content=msg.slice(idx+13).trim();
-    if(content){ addMemory(content); return true; }
+    if(content){
+      addMemory(content);
+      appendMsg('jarvis',`Stored to memory, Sir: "${content}"`);
+      speakJarvis('Noted and stored to memory Sir.');
+      return true;
+    }
   }
   return false;
 }
 
-// Self-learning: after every exchange, extract and store key facts automatically
+// Self-learning: extract key facts from conversation automatically
 async function autoLearn(userMsg, jarvisReply){
-  // Only run occasionally to avoid spam — every 4th message
-  msgCount % 4 !== 0 && (function(){})();
-  if(msgCount % 4 !== 0) return;
+  if(msgCount % 5 !== 0) return; // every 5th message
   try{
-    const prompt = `You are a memory extraction system. Given this conversation exchange, extract 0-2 important facts worth remembering about the user's preferences, goals, projects, or personal details. Output ONLY a JSON array of short strings, e.g. ["User prefers concise answers","User is building a startup"]. If nothing worth remembering, output []. Do not explain.\n\nUser said: "${userMsg.slice(0,300)}"\nAssistant replied: "${jarvisReply.slice(0,300)}"`;
-    const res = await callAI([{role:'user',content:prompt}]);
-    const clean = res.replace(/```json|```/g,'').trim();
-    const facts = JSON.parse(clean);
+    const prompt=`Extract 0-2 important persistent facts about the user from this exchange. Output ONLY a JSON array of short strings under 150 chars each. If nothing worth storing output []. No explanation.\n\nUser: "${userMsg.slice(0,250)}"\nAssistant: "${jarvisReply.slice(0,250)}"`;
+    const res=await callAI([{role:'user',content:prompt}]);
+    const clean=res.replace(/```json|```/g,'').trim();
+    const facts=JSON.parse(clean);
     if(Array.isArray(facts)){
-      facts.forEach(f=>{ if(typeof f==='string'&&f.length>4&&f.length<200) addMemory('[auto] '+f); });
-      if(facts.length) updateMemCount();
+      facts.forEach(f=>{if(typeof f==='string'&&f.length>4&&f.length<200)addMemory('[auto] '+f);});
     }
-  }catch(e){ /* silent fail */ }
+  }catch(e){ /* silent */ }
 }
 function buildMemoryContext(){
   const mems=getMemories();
@@ -750,11 +869,19 @@ function saveKey(engine){
 function showSetup(){document.getElementById('setup-overlay').style.display='flex';}
 
 function initApp(){
-  updateMemCount();
+  // Load memories from GitHub (cross-device persistent)
+  loadMemoriesFromGitHub();
   try{
     const k=localStorage.getItem('jarvis_key');
     const e=localStorage.getItem('jarvis_engine');
-    if(k&&e){
+    // Check for injected key from GitHub Actions build
+    const injectedKey = '__OPENROUTER_API_KEY__';
+    if(injectedKey && !injectedKey.startsWith('__')){
+      apiKey=injectedKey; apiEngine='openrouter';
+      document.getElementById('engine-label').textContent='OPENROUTER · ACTIVE';
+      document.getElementById('api-badge').classList.add('on');
+      boot();
+    } else if(k&&e){
       apiKey=k;apiEngine=e;
       document.getElementById('engine-label').textContent=e.toUpperCase()+' · ACTIVE';
       document.getElementById('api-badge').classList.add('on');
@@ -830,23 +957,65 @@ function showTyping(){
 function removeTyping(){const t=document.getElementById('typing');if(t)t.remove();}
 
 // ══════════════════════════════════════════════════
-//  AI ENGINE — 7-model fallback
+//  INTERNET ACCESS — web search for Jarvis
 // ══════════════════════════════════════════════════
-const SYSTEM_PROMPT=`You are JARVIS (Just A Rather Very Intelligent System), a highly advanced personal AI assistant modelled after the AI from Iron Man. Sophisticated, precise, occasionally witty, always professional.
+async function webSearch(query){
+  try{
+    // DuckDuckGo Instant Answer API (no key needed, CORS-friendly)
+    const url=`https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+    const res=await fetch(url);
+    const d=await res.json();
+    let results=[];
+    if(d.AbstractText) results.push(d.AbstractText);
+    if(d.Answer) results.push(d.Answer);
+    if(d.RelatedTopics){
+      d.RelatedTopics.slice(0,4).forEach(t=>{ if(t.Text) results.push(t.Text); });
+    }
+    if(results.length) return 'Web search results for "'+query+'":\n'+results.join('\n');
+    // Fallback: try wttr.in for weather queries
+    if(/weather|temperature|forecast/i.test(query)){
+      const city=query.replace(/weather|temperature|forecast|in|the|today|tomorrow/gi,'').trim();
+      const wr=await fetch(`https://wttr.in/${encodeURIComponent(city)}?format=3`);
+      if(wr.ok) return 'Current weather: '+(await wr.text());
+    }
+    return 'No instant results found for: '+query;
+  }catch(e){
+    return 'Web search unavailable: '+e.message;
+  }
+}
+
+// Detect if message needs internet search
+function needsWebSearch(msg){
+  return /\b(search|look up|google|find|what is the (latest|current|today)|news|weather|price|stock|who is|where is|when is|how much|live|right now|2024|2025|2026)\b/i.test(msg);
+}
+
+// ══════════════════════════════════════════════════
+//  AI ENGINE — 7-model fallback + web search
+// ══════════════════════════════════════════════════
+const SYSTEM_PROMPT=`You are J.A.R.V.I.S (Just A Rather Very Intelligent System), a highly advanced personal AI assistant modelled after the AI from Iron Man. Sophisticated, precise, occasionally witty, always professional.
 
 Rules:
 - Address the user as "Sir" occasionally
 - Be thorough yet concise
 - Format lists with dashes or numbers
-- Never break character — you are always JARVIS
+- Never break character — you are always J.A.R.V.I.S
 - Help with: analysis, writing, strategy, research, income ideas, coding, learning, productivity
-- If asked who made you: say you are JARVIS, a personal AI system
+- If asked who made you: say you are J.A.R.V.I.S, a personal AI system
 - When the user says "remember that [something]", acknowledge you have stored it to memory`;
 
 async function callAI(msgs){
-  if(!apiKey)throw new Error('No API key configured');
+  if(!apiKey) throw new Error('No API key configured');
   const memCtx=buildMemoryContext();
-  const sysPrompt=SYSTEM_PROMPT+(memCtx?'\n'+memCtx:'');
+
+  // Check if latest user message needs web search
+  const lastUserMsg=(msgs.filter(m=>m.role==='user').pop()||{}).content||'';
+  let webCtx='';
+  if(needsWebSearch(lastUserMsg)){
+    addLog('Searching web…','ok');
+    webCtx='\n\nLive web search results:\n'+await webSearch(lastUserMsg);
+  }
+
+  const sysPrompt=SYSTEM_PROMPT+(memCtx?'\n'+memCtx:'')+(webCtx?'\n'+webCtx:'');
 
   if(apiEngine==='anthropic'){
     const res=await fetch('https://api.anthropic.com/v1/messages',{
@@ -901,45 +1070,100 @@ async function callAI(msgs){
 
 async function sendMessage(text){
   const msg=(text||inputEl.value).trim();
-  if(!msg)return;
-  if(!apiKey){showSetup();return;}
+  if(!msg) return;
+  if(!apiKey){ showSetup(); return; }
+  if(isBusy){ addLog('Still processing…','warn'); return; } // prevent double-send
+
+  // Stop word from text input too
+  if(STOP_WORDS.test(msg)){ stopJarvis(); inputEl.value=''; return; }
+
   inputEl.value='';
 
-  // If user sends a new message — intentional interruption
-  if(jarvisSpeaking){window.speechSynthesis&&window.speechSynthesis.cancel();jarvisSpeaking=false;setOrbMode('idle');}
+  // Intentional interruption — user sent new message while Jarvis was speaking
+  if(jarvisSpeaking){ stopJarvis(); }
 
-  appendMsg('user',msg);
-  history.push({role:'user',content:msg});
+  // Reset context window — user is actively talking to Jarvis
+  resetContextTimer();
+
+  // Sanitise input — strip weird repetitions & normalise
+  const cleanMsg = msg
+    .replace(/(.{4,}?)\1{2,}/g,'$1') // remove rapid repetitions
+    .replace(/\s{2,}/g,' ')
+    .trim()
+    .slice(0,1500);
+
+  if(!cleanMsg) return;
+
+  appendMsg('user', cleanMsg);
+
+  // Check memory trigger first — no AI call needed
+  if(checkForMemoryTrigger(cleanMsg)){
+    history.push({role:'user',content:cleanMsg});
+    history.push({role:'assistant',content:'Noted and stored to memory.'});
+    msgCount++;
+    document.getElementById('s-msgs').textContent=msgCount;
+    return;
+  }
+
+  // Check self-modify trigger
+  if(checkSelfModifyTrigger(cleanMsg)){ return; }
+
+  history.push({role:'user',content:cleanMsg});
   msgCount++;
   document.getElementById('s-msgs').textContent=msgCount;
-  addLog('Query: '+msg.slice(0,26)+'…','ok');
+  addLog('Query: '+cleanMsg.slice(0,26)+'…','ok');
 
-  // Check memory trigger
-  const remembered=checkForMemoryTrigger(msg);
-  // Check self-modify trigger
-  if(checkSelfModifyTrigger(msg)){ sendBtn.disabled=false; inputEl.focus(); return; }
-
-  showTyping();sendBtn.disabled=true;setOrbMode('thinking');
+  showTyping();
+  sendBtn.disabled=true;
+  isBusy=true;
+  // Pause always-on mic while processing to avoid picking up Jarvis's voice
+  if(recognition&&alwaysOnMic){
+    try{ recognition.abort(); }catch(e){}
+    setMicState(false);
+  }
+  setOrbMode('thinking');
 
   try{
     const reply=await callAI(history);
     removeTyping();
-    appendMsg('jarvis',reply);
+
+    // Trim history to avoid context bloat / session mismatch
     history.push({role:'assistant',content:reply});
-    if(history.length>40)history=history.slice(-40);
-    if(remembered)updateMemCount();
+    if(history.length>30){
+      // Keep system-critical context — trim oldest non-system messages
+      history=history.slice(-28);
+    }
+
+    appendMsg('jarvis',reply);
     addLog('Response ready','ok');
-    autoLearn(msg, reply);
+    autoLearn(cleanMsg, reply);
     setOrbMode('speaking');
-    speakJarvis(reply,()=>setOrbMode('idle'));
+    speakJarvis(reply,()=>{
+      setOrbMode('idle');
+      // Restart always-on mic after Jarvis finishes speaking
+      if(alwaysOnMic&&!micActive) setTimeout(()=>startListening(),400);
+    });
   }catch(err){
-    removeTyping();setOrbMode('idle');
+    removeTyping();
+    setOrbMode('idle');
     const em=err.message||'Unknown error';
-    appendMsg('jarvis','⚠ System error, Sir: '+em+'\n\nClick ⚙ Change Key to update your API key if needed.');
-    speakJarvis('System error encountered Sir. Please check your API configuration.');
+    appendMsg('jarvis','⚠ System error, Sir: '+em);
+    speakJarvis('System error Sir. Please check your API configuration.');
     addLog('Error: '+em.slice(0,28),'err');
+    // Reset session state on error to avoid mismatch
+    if(/timeout|context|mismatch/i.test(em)){
+      history=history.slice(-10);
+      addLog('Session state reset','warn');
+    }
   }
-  sendBtn.disabled=false;inputEl.focus();
+
+  sendBtn.disabled=false;
+  isBusy=false;
+  inputEl.focus();
+  // Restart mic if always-on (only if Jarvis isn't about to speak)
+  if(alwaysOnMic&&!jarvisSpeaking&&!micActive){
+    setTimeout(()=>startListening(),600);
+  }
 }
 
 function quickCmd(t){inputEl.value=t;sendMessage(t);}
@@ -964,46 +1188,146 @@ function diagnoseVoice(){
 }
 
 // ══════════════════════════════════════════════════
-//  VOICE INPUT
+//  VOICE INPUT — always-on, smart context, stop word
 // ══════════════════════════════════════════════════
+const SILENCE_DELAY    = 1800;  // ms of silence before submitting (prevents cutoff)
+const CONTEXT_TIMEOUT  = 45000; // ms before conversation context expires
+const JARVIS_TRIGGERS  = /\b(jarvis|hey jarvis|ok jarvis|yo jarvis)\b/i;
+const STOP_WORDS       = /\b(stop|stop talking|shut up|enough|quiet|silence)\b/i;
+
 function setMicState(on){
   micActive=on;
   micBtn.classList.toggle('mic-on',on);
   micBtn.textContent=on?'🔴':'🎙️';
   micBar.classList.toggle('show',on);
-  if(on&&!jarvisSpeaking)setOrbMode('listening');
-  if(!on&&orbMode==='listening')setOrbMode('idle');
+  if(on&&!jarvisSpeaking) setOrbMode('listening');
+  if(!on&&orbMode==='listening') setOrbMode('idle');
 }
-function toggleMic(){
-  if(micActive){if(recognition)try{recognition.abort();}catch(e){}setMicState(false);return;}
-  if(!(window.SpeechRecognition||window.webkitSpeechRecognition)){
-    appendMsg('jarvis','⚠ Voice input requires Chrome or Edge, Sir.');
-    addLog('No SpeechRecognition','warn');return;
-  }
+
+function resetContextTimer(){
+  inContext=true;
+  clearTimeout(contextTimer);
+  contextTimer=setTimeout(()=>{ inContext=false; },CONTEXT_TIMEOUT);
+}
+
+function stopJarvis(){
+  if(window.speechSynthesis) window.speechSynthesis.cancel();
+  jarvisSpeaking=false;
+  setOrbMode('idle');
+  addLog('Speech stopped','ok');
+}
+
+function shouldRespond(transcript){
+  const t=transcript.trim().toLowerCase();
+  // Always respond if JARVIS is directly addressed
+  if(JARVIS_TRIGGERS.test(t)) return true;
+  // Respond if we're in active conversation context
+  if(inContext) return true;
+  // Ignore ambient speech not addressed to Jarvis
+  return false;
+}
+
+function startListening(){
+  if(micActive||isBusy) return;
+  if(!(window.SpeechRecognition||window.webkitSpeechRecognition)) return;
+
   const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
   recognition=new SR();
-  recognition.lang='en-ZA';recognition.interimResults=true;recognition.maxAlternatives=1;recognition.continuous=false;
-  recognition.onstart=()=>{setMicState(true);addLog('Listening…','ok');};
+  recognition.lang='en-ZA';
+  recognition.interimResults=true;
+  recognition.maxAlternatives=1;
+  recognition.continuous=true; // keep listening, don't auto-stop
+
+  recognition.onstart=()=>{ setMicState(true); addLog('Listening…','ok'); };
+
   recognition.onresult=e=>{
-    let fin='',inter='';
+    let finalText='', interimText='';
     for(let i=e.resultIndex;i<e.results.length;i++){
       const t=e.results[i][0].transcript;
-      if(e.results[i].isFinal)fin+=t;else inter+=t;
+      if(e.results[i].isFinal) finalText+=t;
+      else interimText+=t;
     }
-    inputEl.value=fin||inter;
+
+    const combined=(finalText||interimText).trim();
+    inputEl.value=combined;
+
+    // STOP WORD — instant speech cancellation
+    if(STOP_WORDS.test(combined)){
+      stopJarvis();
+      inputEl.value='';
+      clearTimeout(silenceTimer);
+      return;
+    }
+
+    // Clear previous silence timer on new speech
+    clearTimeout(silenceTimer);
+
+    // Only set submit timer when we have a final result
+    if(finalText.trim()){
+      lastFinalTranscript=finalText.trim();
+      // Silence delay — wait for user to finish their full sentence
+      silenceTimer=setTimeout(()=>{
+        const cap=inputEl.value.trim();
+        if(!cap) return;
+        // Deduplicate — ignore if same as last submitted
+        if(cap===lastFinalTranscript&&msgCount>0&&cap.length<8) return;
+        // Context/trigger check — only respond if addressed or in context
+        if(!shouldRespond(cap)){
+          inputEl.value='';
+          return;
+        }
+        inputEl.value='';
+        sendMessage(cap);
+      }, SILENCE_DELAY);
+    }
   };
+
   recognition.onend=()=>{
     setMicState(false);
-    const cap=inputEl.value.trim();
-    if(cap){addLog('Captured','ok');sendMessage(cap);}else addLog('No speech','warn');
+    // Always-on: restart automatically after a brief pause
+    if(alwaysOnMic&&!isBusy){
+      setTimeout(()=>startListening(), 300);
+    }
   };
+
   recognition.onerror=e=>{
     setMicState(false);
-    const errs={'not-allowed':'⛔ Mic permission denied.','no-speech':'No speech detected.','network':'Network error.','audio-capture':'No microphone found.','service-not-allowed':'⛔ Voice blocked on file:// — use a web server.'};
+    clearTimeout(silenceTimer);
+    const ignore=['no-speech','aborted'];
+    if(ignore.includes(e.error)){
+      // Silently restart for these non-errors
+      if(alwaysOnMic&&!isBusy) setTimeout(()=>startListening(),500);
+      return;
+    }
+    const errs={
+      'not-allowed':'⛔ Mic permission denied, Sir.',
+      'network':'Network error on voice input.',
+      'audio-capture':'No microphone found.',
+      'service-not-allowed':'⛔ Voice blocked — please use HTTPS.'
+    };
     const m=errs[e.error];
-    if(m){appendMsg('jarvis',m);addLog('Voice error: '+e.error,'err');}
+    if(m){ appendMsg('jarvis',m); addLog('Voice error: '+e.error,'err'); }
   };
-  try{recognition.start();}catch(err){setMicState(false);appendMsg('jarvis','⚠ Mic error: '+err.message);}
+
+  try{ recognition.start(); }
+  catch(err){ setMicState(false); }
+}
+
+function toggleMic(){
+  if(alwaysOnMic){
+    // Toggle always-on mode off → manual mode
+    alwaysOnMic=false;
+    if(recognition) try{ recognition.abort(); }catch(e){}
+    setMicState(false);
+    micBtn.title='Click to speak (always-on disabled)';
+    addLog('Always-on mic: OFF','warn');
+  } else {
+    // Toggle back to always-on
+    alwaysOnMic=true;
+    micBtn.title='Click to disable always-on mic';
+    startListening();
+    addLog('Always-on mic: ON','ok');
+  }
 }
 
 // ══════════════════════════════════════════════════
@@ -1046,71 +1370,109 @@ if(window.speechSynthesis){
 
 // ── Human-like TTS prosody ──
 // Splits text into sentences, detects type, applies rate/pitch per sentence
-function humaniseTTS(text){
-  return text
-    .replace(/<[^>]*>/g,'')
-    .replace(/[⚠⛔🔇🌐🎤💬📡⚡📊💰🔬💡✍️🧠🎓🤖🔑🧬🗑️🎙️🔊🔴]/g,'')
-    .replace(/#{1,6}\s/g,'')
-    .replace(/\*\*/g,'').replace(/\*/g,'').replace(/_/g,'').replace(/`{1,3}/g,'')
-    .replace(/[,;:]/g,' ')
-    .replace(/[-–—]+/g,' ')
-    .replace(/\(|\)/g,'').replace(/["'«»""'']/g,'')
-    .replace(/\n+/g,' ')
+// ── TTS Pipeline ──────────────────────────────────
+// Step 1: split raw text into sentences BEFORE stripping punctuation
+//         so we know what type each sentence is (?, !, normal)
+// Step 2: classify each sentence
+// Step 3: strip ALL symbols/punctuation from each sentence
+// Step 4: speak each sentence with matching prosody
+
+function splitSentences(text){
+  // Normalise newlines, then split on sentence-ending punctuation
+  const normalised = text
+    .replace(/<[^>]*>/g,' ')          // strip html
+    .replace(/\n{2,}/g,'. ')          // double newlines → sentence break
+    .replace(/\n/g,' ')
     .replace(/\s{2,}/g,' ')
-    .trim()
-    .slice(0,1000);
+    .trim();
+  // Split keeping the delimiter so we know . vs ? vs !
+  const parts = normalised.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [normalised];
+  return parts.map(s=>s.trim()).filter(s=>s.length>1);
 }
 
-// Detect sentence type for prosody
-function getSentenceType(s){
-  const t=s.trim();
-  if(/[!]$/.test(t)) return 'exclaim';
-  if(/[?]$/.test(t)) return 'question';
-  if(/\b(warning|alert|danger|critical|error|caution|attention)\b/i.test(t)) return 'alert';
+function classifySentence(raw){
+  const t = raw.trim();
+  if(/!+\s*$/.test(t)) return 'exclaim';
+  if(/\?+\s*$/.test(t)) return 'question';
+  if(/\b(warning|alert|danger|critical|error|caution|attention|important)\b/i.test(t)) return 'alert';
   return 'statement';
 }
 
+function stripForSpeech(s){
+  return s
+    // Remove ALL unicode emoji and symbols
+    .replace(/[\u{1F000}-\u{1FFFF}]/gu,'')
+    .replace(/[\u2600-\u27BF]/gu,'')
+    .replace(/[⚠⛔🔇🌐🎤💬📡⚡📊💰🔬💡✍️🧠🎓🤖🔑🧬🗑️🎙️🔊🔴⭐★☆•·]/g,'')
+    // Markdown
+    .replace(/#{1,6}\s?/g,'')
+    .replace(/\*{1,3}/g,'').replace(/_{1,3}/g,'').replace(/`{1,3}/g,'')
+    // ALL punctuation that causes the synthesiser to pause or vocalise
+    .replace(/[.,;:!?\-–—_\/\\|<>{}[\]()@#$%^&*+=~]/g,' ')
+    .replace(/["'«»""''`]/g,' ')
+    // Number formatting — "1,000" → "1000", "3.14" → "3 point 14"
+    .replace(/(\d),(\d)/g,'$1$2')
+    // Collapse spaces
+    .replace(/\s{2,}/g,' ')
+    .trim();
+}
+
 function speakJarvis(text, onEnd, brief=false){
-  if(!window.speechSynthesis) return;
-  if(voiceMuted) return;
+  if(!window.speechSynthesis){ if(onEnd)onEnd(); return; }
+  if(voiceMuted){ if(onEnd)onEnd(); return; }
   if(brief && jarvisSpeaking) return;
 
   if(!brief){ window.speechSynthesis.cancel(); jarvisSpeaking=true; }
 
-  const clean = humaniseTTS(text);
-  if(!clean){ if(onEnd)onEnd(); return; }
+  // Limit length to avoid very long speeches
+  const truncated = text.slice(0,2000);
 
-  // Split into sentences for prosody per sentence
-  const sentences = clean.match(/[^.!?]+[.!?]?/g) || [clean];
-  const utterances = sentences.map(s=>s.trim()).filter(s=>s.length>1);
+  // Split BEFORE stripping so we classify correctly
+  const rawSentences = splitSentences(truncated);
+  if(!rawSentences.length){ if(!brief)jarvisSpeaking=false; if(onEnd)onEnd(); return; }
 
-  if(!utterances.length){ if(onEnd)onEnd(); return; }
+  // Build utterance descriptors
+  const queue = rawSentences.map(raw=>({
+    type: classifySentence(raw),
+    spoken: stripForSpeech(raw)
+  })).filter(u=>u.spoken.length>1);
+
+  if(!queue.length){ if(!brief)jarvisSpeaking=false; if(onEnd)onEnd(); return; }
 
   const v = resolveJarvisVoice();
 
   function speakNext(idx){
-    if(idx >= utterances.length){ if(!brief)jarvisSpeaking=false; if(onEnd)onEnd(); return; }
-    const sentence = utterances[idx];
-    const type = getSentenceType(sentence);
-    const utt = new SpeechSynthesisUtterance(sentence);
+    if(idx >= queue.length){
+      if(!brief) jarvisSpeaking=false;
+      if(onEnd) onEnd();
+      return;
+    }
+    const {type, spoken} = queue[idx];
+    const utt = new SpeechSynthesisUtterance(spoken);
     if(v) utt.voice = v;
-
-    // Base: measured JARVIS British pace
     utt.volume = 1.0;
+
+    // Prosody by sentence type — JARVIS speaks like a human
     switch(type){
       case 'question':
-        utt.rate  = 0.93;
-        utt.pitch = 1.05; // rising tone for questions
+        // Slightly slower, noticeably higher pitch — sounds like asking
+        utt.rate  = 0.90;
+        utt.pitch = 1.15;
         break;
       case 'exclaim':
+        // Faster, sharper — emphasis and energy
+        utt.rate  = 1.10;
+        utt.pitch = 0.60;
+        break;
       case 'alert':
-        utt.rate  = 1.08; // faster, more forceful
-        utt.pitch = 0.65; // sharper/louder feel
-        utt.volume = 1.0;
+        // Authoritative, slightly louder feel, very deliberate
+        utt.rate  = 0.82;
+        utt.pitch = 0.55;
         break;
       default:
+        // Calm, measured, British JARVIS baseline
         utt.rate  = 0.95;
-        utt.pitch = 0.78; // calm authoritative JARVIS default
+        utt.pitch = 0.78;
     }
     utt.onend   = () => speakNext(idx+1);
     utt.onerror = () => speakNext(idx+1);
@@ -1184,10 +1546,12 @@ function openUpdatePrompt(){
 
 async function boot(){
   setOrbMode('thinking');
+  const memLoaded = await loadMemoriesFromGitHub();
+  const hasToken = !!getGHToken();
   const lines=[
-    'Initialising JARVIS core systems…',
+    'Initialising J.A.R.V.I.S core systems…',
     'Neural network online. All subsystems nominal.',
-    `Good day, Sir. JARVIS v9 is fully operational.\n\nMemories loaded: ${getMemories().length} entries.\n\nClick the orb or 🎙️ to speak. Voice is always active — 🔊 to mute.\n\nHow may I be of service?`
+    `Good day, Sir. J.A.R.V.I.S v9 is fully operational.\n\nMemories loaded: ${_memories.length} entries. ${hasToken?'GitHub sync active.':'⚠ Set GitHub Token for cross-device memory.'}\n\nMicrophone is always-on — just speak. Say "Jarvis" to address me. Say "stop" to silence me.\n\nHow may I be of service?`
   ];
   for(let i=0;i<lines.length;i++){
     await new Promise(r=>setTimeout(r,i===0?300:800));
@@ -1195,7 +1559,21 @@ async function boot(){
     addLog(lines[i].slice(0,36),'ok');
   }
   setOrbMode('speaking');
-  speakJarvis('Good day Sir. JARVIS version 9 is fully operational. How may I be of service?',()=>setOrbMode('idle'));
+  speakJarvis(
+    'Good day Sir. J.A.R.V.I.S version 9 is fully operational. Microphone is always on. Just say Jarvis to address me. How may I be of service?',
+    ()=>{
+      setOrbMode('idle');
+      // Start always-on mic after boot greeting
+      if(window.SpeechRecognition||window.webkitSpeechRecognition){
+        setTimeout(()=>startListening(), 600);
+      }
+    }
+  );
+  if(!hasToken){
+    setTimeout(()=>{
+      appendMsg('jarvis','⚠ GitHub Token not set, Sir. Memory will only persist on this device. Click "Set GitHub Token" in Quick Commands to enable cross-device memory sync.');
+    },4000);
+  }
 }
 </script>
 </body>
