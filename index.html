@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>J.A.R.V.I.S</title>
+<title>JARVIS</title>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -191,7 +191,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <!-- ══ LOGIN ══ -->
 <div id="login-overlay">
   <div class="login-card">
-    <div class="login-logo">J.A.R.V.I.S · SECURE ACCESS</div>
+    <div class="login-logo">JARVIS · SECURE ACCESS</div>
     <div class="login-title">Authentication Required</div>
     <div class="login-sub">Restricted system — authorised personnel only.</div>
     <div class="login-scan"></div>
@@ -218,7 +218,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <!-- ══ SETUP OVERLAY ══ -->
 <div id="setup-overlay" style="display:none;">
   <div class="setup-card">
-    <div class="setup-logo">J.A.R.V.I.S · AI ENGINE</div>
+    <div class="setup-logo">JARVIS · AI ENGINE</div>
     <div class="setup-title">Connect AI Engine</div>
     <div class="setup-sub">Jarvis uses your own API key — no message limits.<br><a href="https://openrouter.ai" target="_blank">OpenRouter</a> is free with no credit card required.</div>
     <div class="stabs">
@@ -249,7 +249,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
 <div id="app">
   <!-- HEADER -->
   <header>
-    <div class="h-brand"><div class="h-dot"></div><div class="h-name">J.A.R.V.I.S <span>· SYSTEM ONLINE</span></div></div>
+    <div class="h-brand"><div class="h-dot"></div><div class="h-name">JARVIS <span>· SYSTEM ONLINE</span></div></div>
     <div class="h-center">
       <span id="engine-label" style="color:var(--text3);font-size:0.7rem;letter-spacing:0.06em;"></span>
       <span id="clock-el">--:--:--</span>
@@ -290,7 +290,7 @@ header{grid-column:1/-1;display:flex;align-items:center;justify-content:space-be
   <div class="main-col">
     <div class="orb-area" id="orb-area">
       <canvas id="orb-canvas" width="560" height="560" title="Click to speak"></canvas>
-      <div class="orb-label">J.A.R.V.I.S</div>
+      <div class="orb-label">JARVIS</div>
       <div class="orb-state" id="orb-state">Standby</div>
     </div>
     <div id="chat-panel">
@@ -1679,9 +1679,9 @@ async function boot(){
   const memLoaded = await loadMemoriesFromGist();
   const hasToken = !!getGHToken();
   const lines=[
-    'Initialising J.A.R.V.I.S core systems…',
+    'Initialising JARVIS core systems…',
     'Neural network online. All subsystems nominal.',
-    `Good day, Sir. J.A.R.V.I.S v9 is fully operational.\n\nMemories loaded: ${_memories.length} entries. ${hasToken?'GitHub sync active.':'⚠ Set GitHub Token for cross-device memory.'}\n\nMicrophone is always-on — just speak. Say "Jarvis" to address me. Say "stop" to silence me.\n\nHow may I be of service?`
+    `Good day, Sir. JARVIS v9 is fully operational.\n\nMemories loaded: ${_memories.length} entries. ${hasToken?'GitHub sync active.':'⚠ Set GitHub Token for cross-device memory.'}\n\nMicrophone is always-on — just speak. Say "Jarvis" to address me. Say "stop" to silence me.\n\nHow may I be of service?`
   ];
   for(let i=0;i<lines.length;i++){
     await new Promise(r=>setTimeout(r,i===0?300:800));
@@ -1690,7 +1690,7 @@ async function boot(){
   }
   setOrbMode('speaking');
   speakJarvis(
-    'Good day Sir. J.A.R.V.I.S version 9 is fully operational. Microphone is always on. Just say Jarvis to address me. How may I be of service?',
+    'Good day Sir. JARVIS version 9 is fully operational. Microphone is always on. Just say Jarvis to address me. How may I be of service?',
     ()=>{
       setOrbMode('idle');
       isBusy=false;
