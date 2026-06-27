@@ -677,39 +677,32 @@ function drawOrb(){
 drawOrb();
 
 // ══════════════════════════════════════════════════
-//  MEMORY SYSTEM — GitHub Gist backend
-//  ✅ Full CORS support from any browser/device
-//  ✅ Persists across all devices with one token
-//  ✅ No repo file needed — Gist is self-contained
-//  Falls back to localStorage if token not set
+//  MEMORY SYSTEM — GitHub Repo Contents API
+//  Reads and writes directly to:
+//  github.com/PrestivoPrime/Jarvis → memory/memories.json
+//  Token needs scope: repo  (or public_repo for public repos)
+//  Falls back to localStorage if no token is set.
 // ══════════════════════════════════════════════════
-const GIST_FILENAME = 'jarvis_memories.json';
-const GIST_API      = 'https://api.github.com/gists';
+const GH_OWNER    = 'PrestivoPrime';
+const GH_REPO     = 'Jarvis';
+const GH_PATH     = 'memory/memories.json';
+const GH_API_BASE = `https://api.github.com/repos/${GH_OWNER}/${GH_REPO}/contents/${GH_PATH}`;
+const GH_BRANCH   = 'main';
 
 let _memories     = [];
 let _memoryLoaded = false;
 let _ghToken      = null;
-let _gistId       = null; // stored after first create
+let _fileSha      = null; // GitHub requires the blob SHA to update an existing file
 
 function getGHToken(){
   if(_ghToken) return _ghToken;
   try{ _ghToken = localStorage.getItem('j_gh_token')||null; }catch(e){}
   return _ghToken;
 }
-function getGistId(){
-  if(_gistId) return _gistId;
-  try{ _gistId = localStorage.getItem('j_gist_id')||null; }catch(e){}
-  return _gistId;
-}
 function setGHToken(t){
   _ghToken = t;
   try{ localStorage.setItem('j_gh_token', t); }catch(e){}
 }
-function setGistId(id){
-  _gistId = id;
-  try{ localStorage.setItem('j_gist_id', id); }catch(e){}
-}
-
 function ghHeaders(){
   const tok = getGHToken();
   const h = {'Content-Type':'application/json','Accept':'application/vnd.github.v3+json'};
@@ -717,126 +710,113 @@ function ghHeaders(){
   return h;
 }
 
+// ── LOAD from repo ────────────────────────────────
 async function loadMemoriesFromGist(){
+  // "FromGist" name kept for compatibility — actually reads from repo now
   try{
-    // Try to load from localStorage first for instant display
+    // Show localStorage immediately while we fetch from GitHub
     try{
       const local = JSON.parse(localStorage.getItem('j_memories')||'[]');
       if(local.length){ _memories=local; updateMemCount(); }
     }catch(e){}
 
     const tok = getGHToken();
-    if(!tok){ _memoryLoaded=true; addLog('Memory: local only — set token for sync','warn'); return; }
-
-    const gistId = getGistId();
-
-    if(gistId){
-      // Fetch existing gist
-      const res = await fetch(GIST_API+'/'+gistId, {headers:ghHeaders()});
-      if(res.ok){
-        const data = await res.json();
-        const content = data.files[GIST_FILENAME]?.content || '[]';
-        _memories = JSON.parse(content) || [];
-        // Sync local cache
-        try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
-        _memoryLoaded=true;
-        updateMemCount();
-        addLog('Memory loaded from Gist: '+_memories.length+' entries','ok');
-        return;
-      } else if(res.status===404){
-        // Gist was deleted — clear stored ID and recreate
-        setGistId(null); _gistId=null;
-      }
+    if(!tok){
+      _memoryLoaded=true;
+      addLog('Memory: local only — set GitHub token for repo sync','warn');
+      return;
     }
 
-    // No gist ID stored — search for existing Jarvis gist
-    const listRes = await fetch(GIST_API+'?per_page=100', {headers:ghHeaders()});
-    if(listRes.ok){
-      const gists = await listRes.json();
-      const found = gists.find(g=>g.files&&g.files[GIST_FILENAME]);
-      if(found){
-        setGistId(found.id);
-        const content = found.files[GIST_FILENAME]?.content || '[]';
-        _memories = JSON.parse(content) || [];
-        try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
-        _memoryLoaded=true;
-        updateMemCount();
-        addLog('Gist found & loaded: '+_memories.length+' entries','ok');
-        return;
-      }
+    const res = await fetch(GH_API_BASE+'?ref='+GH_BRANCH, {headers:ghHeaders()});
+    if(res.ok){
+      const data = await res.json();
+      _fileSha = data.sha; // store SHA — needed for PATCH/PUT later
+      const decoded = atob(data.content.replace(/\n/g,''));
+      _memories = JSON.parse(decoded) || [];
+      try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
+      _memoryLoaded=true;
+      updateMemCount();
+      addLog('Memory loaded from repo: '+_memories.length+' entries','ok');
+    } else if(res.status===404){
+      // File doesn't exist yet in repo — create it
+      addLog('memories.json not found in repo — creating…','warn');
+      await saveMemoriesToGist(true);
+      _memoryLoaded=true;
+      updateMemCount();
+    } else if(res.status===401||res.status===403){
+      addLog('GitHub token invalid or lacks repo scope','err');
+      _memoryLoaded=true;
+    } else {
+      const e = await res.json().catch(()=>({}));
+      addLog('Memory load error: '+(e.message||res.status),'err');
+      _memoryLoaded=true;
     }
-
-    // No gist exists yet — create one
-    await createGist();
-    _memoryLoaded=true;
-    updateMemCount();
   }catch(e){
     try{ _memories=JSON.parse(localStorage.getItem('j_memories')||'[]'); }catch(ex){ _memories=[]; }
     _memoryLoaded=true;
     updateMemCount();
-    addLog('Memory load error: '+e.message,'err');
+    addLog('Memory load exception: '+e.message,'err');
   }
 }
 
-async function createGist(){
-  const tok = getGHToken();
-  if(!tok) return;
-  try{
-    const res = await fetch(GIST_API,{
-      method:'POST',
-      headers:ghHeaders(),
-      body:JSON.stringify({
-        description:'J.A.R.V.I.S Memory Bank — PrestivoPrime',
-        public:false,
-        files:{ [GIST_FILENAME]:{ content: JSON.stringify(_memories,null,2) } }
-      })
-    });
-    if(res.ok){
-      const d = await res.json();
-      setGistId(d.id);
-      addLog('Memory Gist created','ok');
-    } else {
-      const e=await res.json();
-      addLog('Gist create failed: '+(e.message||res.status),'err');
-    }
-  }catch(e){ addLog('Gist create error: '+e.message,'err'); }
-}
-
-async function saveMemoriesToGist(){
-  // Save locally immediately — always works, instant
+// ── SAVE to repo ──────────────────────────────────
+async function saveMemoriesToGist(isCreate=false){
+  // Always save locally first — instant, no network needed
   try{ localStorage.setItem('j_memories', JSON.stringify(_memories)); }catch(e){}
   updateMemCount();
 
   const tok = getGHToken();
-  if(!tok){ addLog('Memory saved locally — set token to sync across devices','warn'); return; }
+  if(!tok){
+    addLog('Memory saved locally only — set GitHub token to sync to repo','warn');
+    return;
+  }
 
-  const gistId = getGistId();
-  if(!gistId){ await createGist(); return; }
+  const contentBase64 = btoa(unescape(encodeURIComponent(JSON.stringify(_memories,null,2))));
+  const body = {
+    message: 'Jarvis memory update — '+new Date().toISOString(),
+    content: contentBase64,
+    branch:  GH_BRANCH,
+  };
+  // If we have the file SHA, include it so GitHub treats this as an update not a conflict
+  if(_fileSha && !isCreate) body.sha = _fileSha;
 
   try{
-    const res = await fetch(GIST_API+'/'+gistId,{
-      method:'PATCH',
-      headers:ghHeaders(),
-      body:JSON.stringify({
-        files:{ [GIST_FILENAME]:{ content: JSON.stringify(_memories,null,2) } }
-      })
+    const res = await fetch(GH_API_BASE, {
+      method:  'PUT',  // PUT creates or updates in Contents API
+      headers: ghHeaders(),
+      body:    JSON.stringify(body),
     });
     if(res.ok){
-      addLog('Memory synced to Gist ✓','ok');
+      const d = await res.json();
+      _fileSha = d.content.sha; // update SHA for next save
+      addLog('Memory synced to GitHub repo ✓','ok');
     } else {
-      const e=await res.json();
-      addLog('Gist save failed: '+(e.message||res.status),'err');
-      if(res.status===404){ setGistId(null); _gistId=null; await createGist(); }
+      const e = await res.json().catch(()=>({}));
+      addLog('Repo save failed: '+(e.message||res.status),'err');
+      // If conflict (SHA mismatch) — re-fetch SHA and retry once
+      if(res.status===409||res.status===422){
+        addLog('SHA conflict — re-fetching and retrying…','warn');
+        const fresh = await fetch(GH_API_BASE+'?ref='+GH_BRANCH,{headers:ghHeaders()});
+        if(fresh.ok){
+          const fd = await fresh.json();
+          _fileSha = fd.sha;
+          body.sha = _fileSha;
+          const retry = await fetch(GH_API_BASE,{method:'PUT',headers:ghHeaders(),body:JSON.stringify(body)});
+          if(retry.ok){ const rd=await retry.json(); _fileSha=rd.content.sha; addLog('Retry save OK','ok'); }
+          else { addLog('Retry save failed','err'); }
+        }
+      }
     }
   }catch(e){
-    addLog('Gist save error: '+e.message,'err');
+    addLog('Repo save exception: '+e.message,'err');
   }
 }
 
 function getMemories(){ return _memories; }
 
 function addMemory(text){
-  if(_memories.some(m=>m.text===text)) return; // no duplicates
+  text = text.trim();
+  if(!text || _memories.some(m=>m.text===text)) return; // no duplicates
   _memories.push({text, ts:new Date().toISOString()});
   if(_memories.length>300) _memories.shift();
   saveMemoriesToGist();
@@ -874,14 +854,14 @@ function promptGHToken(){
   const existing = getGHToken();
   const msg = existing
     ? 'GitHub token is already set.\n\nEnter a new token to replace it, or leave blank to keep current:'
-    : 'Enter your GitHub Personal Access Token.\n\nCreate one at:\ngithub.com → Settings → Developer settings → Personal access tokens → Tokens (classic)\n\nScopes needed: tick ONLY "gist"\n\nPaste your token (starts with ghp_):';
+    : 'Enter your GitHub Personal Access Token.\n\nCreate one at:\ngithub.com → Settings → Developer settings → Personal access tokens → Tokens (classic)\n\nRequired scope: tick ONLY "repo" (needed to read/write files in your Jarvis repo)\n\nPaste your token (starts with ghp_):';
   const t = prompt(msg);
   if(t && t.trim()){
     setGHToken(t.trim());
-    setGistId(null); _gistId=null; // reset gist search so we find/create fresh
-    appendMsg('jarvis','GitHub token saved, Sir. Connecting to memory Gist now…');
+    _fileSha = null; // reset SHA so we re-fetch cleanly
+    appendMsg('jarvis','GitHub token saved, Sir. Connecting to memory file in repo now…');
     loadMemoriesFromGist().then(()=>{
-      appendMsg('jarvis','Memory system connected, Sir. '+_memories.length+' memories loaded. All future memories will sync across every device.');
+      appendMsg('jarvis','Memory system connected, Sir. '+_memories.length+' memories loaded from github.com/PrestivoPrime/Jarvis. All future memories will sync there automatically.');
       speakJarvis('Memory system connected Sir. Ready to remember.');
     });
   } else if(t!==null){
@@ -904,20 +884,9 @@ function checkForMemoryTrigger(msg){
   return false;
 }
 
+// autoLearn — extract facts every 5th message and store to memory
 async function autoLearn(userMsg, jarvisReply){
   if(msgCount % 5 !== 0) return;
-  try{
-    const prompt=`Extract 0-2 important persistent facts about the user from this exchange. Output ONLY a JSON array of short strings under 150 chars each. If nothing worth storing output []. No explanation.\n\nUser: "${userMsg.slice(0,250)}"\nAssistant: "${jarvisReply.slice(0,250)}"`;
-    const res=await callAI([{role:'user',content:prompt}]);
-    const clean=res.replace(/```json|```/g,'').trim();
-    const facts=JSON.parse(clean);
-    if(Array.isArray(facts)){
-      facts.forEach(f=>{if(typeof f==='string'&&f.length>4&&f.length<200)addMemory('[auto] '+f);});
-    }
-  }catch(e){ /* silent */ }
-}
-async function autoLearn(userMsg, jarvisReply){
-  if(msgCount % 5 !== 0) return; // every 5th message
   try{
     const prompt=`Extract 0-2 important persistent facts about the user from this exchange. Output ONLY a JSON array of short strings under 150 chars each. If nothing worth storing output []. No explanation.\n\nUser: "${userMsg.slice(0,250)}"\nAssistant: "${jarvisReply.slice(0,250)}"`;
     const res=await callAI([{role:'user',content:prompt}]);
