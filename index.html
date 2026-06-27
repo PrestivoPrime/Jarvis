@@ -1371,26 +1371,20 @@ function startListening(){
     };
 
     recognition.onend=()=>{
-      // onend fires normally — only restart if always-on is still enabled
-      // and we're not busy/speaking. Use a longer delay to prevent loop.
+      // FIX: do NOT null recognition here and do NOT call startListening().
+      // The heartbeat interval below is the single authority that decides
+      // when to restart — this eliminates the null→startListening→onend loop.
       setMicState(false);
-      recognition=null; // allow fresh object next time
-      if(alwaysOnMic&&!isBusy&&!jarvisSpeaking){
-        setTimeout(()=>startListening(), 1200);
-      }
+      recognition._ended = true; // flag so heartbeat knows it stopped
     };
 
     recognition.onerror=e=>{
       clearTimeout(silenceTimer);
       setMicState(false);
-      recognition=null;
-      // no-speech and aborted are not real errors — restart quietly
-      if(e.error==='no-speech'||e.error==='aborted'){
-        if(alwaysOnMic&&!isBusy&&!jarvisSpeaking){
-          setTimeout(()=>startListening(), 1500);
-        }
-        return;
-      }
+      recognition._ended = true; // heartbeat will restart if appropriate
+      // no-speech and aborted are normal during always-on — heartbeat handles restart
+      if(e.error==='no-speech'||e.error==='aborted') return;
+      // Fatal errors — disable always-on and inform the user
       const errs={
         'not-allowed':'⛔ Mic permission denied, Sir. Please allow microphone access.',
         'network':'Network error on voice input.',
@@ -1398,20 +1392,54 @@ function startListening(){
         'service-not-allowed':'⛔ Voice blocked — Jarvis requires HTTPS.'
       };
       const m=errs[e.error];
-      if(m){ appendMsg('jarvis',m); addLog('Voice error: '+e.error,'err'); }
+      if(m){
+        alwaysOnMic=false; // stop heartbeat trying to restart a fatally broken mic
+        recognition=null;
+        setMicState(false);
+        appendMsg('jarvis',m);
+        addLog('Voice error: '+e.error,'err');
+      }
     };
   }
 
   try{
+    recognition._ended = false;
     recognition.start();
   }catch(err){
-    // InvalidStateError means it's already running — that's fine
+    // InvalidStateError means it's already running — that's fine, do nothing
     if(err.name!=='InvalidStateError'){
-      recognition=null;
+      recognition._ended = true;
       setMicState(false);
     }
   }
 }
+
+// ── MIC HEARTBEAT ─────────────────────────────────────────────────────────
+// Single interval that owns all restart decisions. No setTimeout chains.
+// Fires every 1 600 ms — checks if recognition has stopped and conditions
+// allow a restart. This replaces every setTimeout(startListening,…) call
+// that was previously scattered across onend / onerror.
+// ──────────────────────────────────────────────────────────────────────────
+(function initMicHeartbeat(){
+  setInterval(()=>{
+    if(!alwaysOnMic)       return; // user disabled mic
+    if(isBusy)             return; // waiting for AI response
+    if(jarvisSpeaking)     return; // Jarvis is talking
+    if(micActive)          return; // already listening (onstart fired, onend hasn't)
+    if(startListening._pending) return; // debounce still cooling down
+
+    // If recognition exists but has ended (._ended flag), null it so a
+    // fresh object is created, preventing InvalidStateError on .start()
+    if(recognition && recognition._ended){
+      recognition = null;
+    }
+
+    // Only restart if recognition is gone (cleanly ended or never started)
+    if(!recognition){
+      startListening();
+    }
+  }, 1600);
+})();
 
 function stopListening(){
   if(recognition){
@@ -1580,8 +1608,18 @@ function speakJarvis(text, onEnd, brief=false){
         utt.rate  = 0.95;
         utt.pitch = 0.78;
     }
-    utt.onend   = () => speakNext(idx+1);
-    utt.onerror = () => speakNext(idx+1);
+    utt.onend   = () => { clearTimeout(uttWatchdog); speakNext(idx+1); };
+    utt.onerror = () => { clearTimeout(uttWatchdog); speakNext(idx+1); };
+
+    // WATCHDOG — if onend never fires (browser bug on long queues), force-advance
+    // after (estimated speech duration + 4 s) so jarvisSpeaking never stays true.
+    const wordCount   = spoken.split(/\s+/).length;
+    const rateAtPlay  = utt.rate || 0.95;
+    const estMs       = Math.max(4000, (wordCount / (rateAtPlay * 2.5)) * 1000 + 4000);
+    const uttWatchdog = setTimeout(()=>{
+      addLog('TTS watchdog fired — forcing advance','warn');
+      speakNext(idx+1);
+    }, estMs);
     window.speechSynthesis.speak(utt);
   }
   speakNext(0);
